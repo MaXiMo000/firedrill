@@ -497,11 +497,17 @@ def test_integration_dump_is_mounted_read_only():
 def test_integration_docker_unavailable_reports_rather_than_passes():
     """The rule, exercised end to end: no daemon means no verification, not a pass."""
     needs_docker()
+    # Resolve the fixture BEFORE breaking the environment. Building the corpus
+    # needs a working daemon, and on a fresh checkout this is the first test
+    # that touches it -- so sabotaging DOCKER_HOST first made this test skip
+    # itself rather than run. It went green locally and would have failed CI,
+    # which always starts from a clean clone.
+    fixture = corpus("healthy_pg16.dump")
     import os
     saved = os.environ.get("DOCKER_HOST")
     os.environ["DOCKER_HOST"] = "unix:///firedrill-nonexistent.sock"
     try:
-        report = drill.run(corpus("healthy_pg16.dump"))
+        report = drill.run(fixture)
     finally:
         if saved is None:
             os.environ.pop("DOCKER_HOST", None)
