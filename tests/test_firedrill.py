@@ -463,7 +463,11 @@ def test_config_reads_the_documented_example():
     cfg = config.loads(GOOD_CONFIG)
     check("tier", cfg.tier, "full")
     check("rto in seconds", cfg.rto_budget, 2700.0)
-    check("reference", str(cfg.structure_reference), "schema/production.sql")
+    # Compared as a path, not as a string: Windows renders the same Path as
+    # 'schema\\production.sql', which is correct behaviour and a failing
+    # string comparison. This is the sort of thing the Windows leg is for.
+    check("reference", cfg.structure_reference,
+          pathlib.Path("schema/production.sql"))
     check("global tolerance", cfg.volume_tolerance, 0.10)
     check("per-table min_rows", cfg.volume_tables["orders"].min_rows, 1)
     check("per-table tolerance", cfg.volume_tables["audit_log"].tolerance, 0.50)
