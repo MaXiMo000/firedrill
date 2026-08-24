@@ -59,22 +59,36 @@ not a feature, they are the price of admission.
 
 ## Status
 
-**Phase 0 is built and green.** Branch `phase-0`, two commits, 47 tests / 99
-checks / 0 skipped. There is **no git remote** — nothing is pushed anywhere yet.
+**Phase 0 and most of Phase 1 are built and green.** `main`, 80 tests / 195
+checks / 0 skipped. Repo: <https://github.com/MaXiMo000/firedrill> (public).
+CI runs on every push: Linux/Windows × Python 3.10/3.13, plus image, package
+and dogfood jobs.
 
 ```
 firedrill/
   archive.py   custom-format header parsed in pure Python (no host pg client)
   docker.py    ephemeral version-matched container, teardown in a finally
   restore.py   pg_restore inside the container + stderr classifier
-  drill.py     inspect -> target -> restore -> smoke, each timed
+  config.py    firedrill.yml -> typed settings, refuses ambiguity   [phase 1]
+  ladder.py    structure / volume / semantics / integrity           [phase 1]
+  drill.py     inspect -> target -> restore -> smoke -> ladder, each timed
   report.py    human table + --json
   cli.py       run / clean
 tests/
   make_corpus.py      builds the broken-backup fixtures from real containers
-  test_firedrill.py   47 tests; --require-integration makes a skip a failure
+  test_firedrill.py   80 tests; --require-integration makes a skip a failure
   headers/            512-byte committed headers so the parser is testable
                       on a runner that cannot run Linux containers
+```
+
+### Pushing, if you are on the other GitHub account
+
+The repo belongs to `MaXiMo000`; this machine's SSH key belongs to
+`Ritishsaini06`, so `origin` is HTTPS with a repo-local `gh` credential
+helper. `gh` serves whichever account is *active*, so before pushing:
+
+```bash
+gh auth switch --user MaXiMo000
 ```
 
 `firedrill run <dump.dump>` → per-stage timings and a verdict that separates
@@ -96,7 +110,32 @@ and found nothing at or above `--fail-on` (default `high`).
 - **No DSN target exists yet** — the safest implementation of "refuses any
   target it did not create" is to have no other target. §7's four interlocks
   arrive with the DSN target.
-- **No dependencies.** Phase 0 is stdlib only; psycopg arrives in Phase 1.
+- **No dependencies.** Phase 0 is stdlib only. Phase 1 added **PyYAML** and
+  nothing else.
+
+### Decisions added during Phase 1
+
+- **No psycopg, and no published port.** This overturns PLAN.md §5. Phase 0
+  already shipped `container.sql()`, and `docker.py` publishes no port at all
+  — "not reachable from the host" is a §7 safety property. psycopg would have
+  required spending it to get typed results for queries that only ever return
+  a single number. Every rung uses `docker exec psql -tA`.
+- **`ladder.py` is one flat module**, not the `stages/` package §5 sketches.
+  Four functions sit beside `archive.py` and `restore.py`, matching the layout
+  the package already has.
+- **`NOT_CONFIGURED` is a distinct stage status.** "Nothing asked for this" and
+  "this was asked for and could not run" are different facts, and neither is a
+  tick. The report prints `n/a`.
+- **Suppression is applied in one place**, wrapping `_run`, because `_run` can
+  return from five points and a missed one would silently un-suppress a
+  finding — or hide one nobody asked to hide. Suppressed findings are printed
+  with their written reason, never deleted.
+- **The structure reference excludes internal schemas and `contype = 'n'`.**
+  Both were measured, not reasoned: `pg_toast` indexes made the first
+  reference 48 lines of per-database OIDs, and PG18 materialises NOT NULL as
+  `pg_constraint` rows where PG16 does not, so a pg16 reference called every
+  not-null column drift on pg18. One reference is now portable across majors,
+  and a test asserts it.
 
 ### Correction to PLAN.md §3.3
 
@@ -109,16 +148,26 @@ a guard, not as a dependency on that measurement holding.
 
 ## First move in the new chat
 
-Two things are outstanding before Phase 1:
+Phase 1 is nearly done. What is left, in order:
 
-1. **`phase-0` is unmerged and there is no remote.** Decide whether to
-   fast-forward `main`, and whether to create the GitHub repo. The CI and
-   release workflows are written but **have never executed** — the
-   Linux/Windows matrix is unproven until something is pushed.
-2. **Then `PLAN.md` §9 Phase 1** — the ladder: structure, volume, semantics,
-   integrity, the config file, the `Finding` model's remaining severities.
-   `tests/make_corpus.py` already lists the §8 fixtures still to build and the
-   technique each one needs, at the bottom of the file.
+1. **Two checks are deliberately unbuilt**, because neither can be verified
+   yet and shipping an unverifiable check is the thing this project refuses.
+   Both need a purpose-built *target image* rather than a purpose-built dump:
+   - `COLLATION_MISMATCH` — PLAN.md §3.4, the flagship silent failure. Needs a
+     target whose libc differs from the source's. Build an image `FROM
+     postgres:16` on a different base, or restore a glibc dump into the alpine
+     flavour that `--image-flavour` already exposes.
+   - `EXTENSION_ABSENT` — needs an image with an extension's control file
+     removed. `ladder.integrity`'s docstring records what each is waiting for.
+2. **`volume.tolerance` parses but nothing reads it.** The config accepts it
+   and the loader's own rule is that a parsed-and-ignored key is a silent
+   skip. It needs either a check that reads it (compare against counts stored
+   alongside the structure reference) or a refusal until Phase 3's
+   `history.json` exists. **Do not leave it as it is** — it is exactly the
+   failure `_reject_unknown` was written to prevent.
+3. **The README does not document the config file.** It stops at Phase 0.
+4. Then PLAN.md §9 **Phase 2** — S3/GCS sources, checksums, and the
+   `fast`/`sample` tiers that `config.py` currently refuses by name.
 
 Run the suite before changing anything:
 

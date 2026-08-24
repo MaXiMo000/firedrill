@@ -432,10 +432,8 @@ rto_budget: 45m
 structure:
   reference: schema/production.sql
 volume:
-  tolerance: 10%
   tables:
     orders: {min_rows: 1}
-    audit_log: {tolerance: 50%}
 semantics:
   - name: recent orders exist
     sql: SELECT count(*) FROM orders WHERE created_at > now() - interval '7 days'
@@ -468,9 +466,7 @@ def test_config_reads_the_documented_example():
     # string comparison. This is the sort of thing the Windows leg is for.
     check("reference", cfg.structure_reference,
           pathlib.Path("schema/production.sql"))
-    check("global tolerance", cfg.volume_tolerance, 0.10)
     check("per-table min_rows", cfg.volume_tables["orders"].min_rows, 1)
-    check("per-table tolerance", cfg.volume_tables["audit_log"].tolerance, 0.50)
     check("one semantic check", len(cfg.semantics), 1)
     check("operator", cfg.semantics[0].op, ">")
     check("threshold", cfg.semantics[0].threshold, 0)
@@ -573,9 +569,17 @@ def test_config_empty_file_is_an_error():
     _rejects("empty", "\n", "empty")
 
 
-def test_config_tolerance_requires_a_percent_sign():
-    _rejects("bare number", "version: 1\nvolume:\n  tolerance: 10\n", "ambiguous")
-    check("percent parses", config.parse_percent("50%"), 0.50)
+def test_config_tolerance_is_refused_until_something_records_a_baseline():
+    """The loader's own rule, applied to its author: volume.tolerance compares
+    against the last known-good restore, and nothing records one until
+    history.json. Parsed-and-never-read is the silent skip it exists to stop."""
+    _rejects("global", "version: 1\nvolume:\n  tolerance: 10%\n",
+             "not implemented yet")
+    _rejects("per table",
+             "version: 1\nvolume:\n  tables:\n    orders: {tolerance: 50%}\n",
+             "not implemented yet")
+    check("the percent parser is still correct for when it lands",
+          config.parse_percent("50%"), 0.50)
 
 
 def test_config_empty_table_rule_is_an_error():

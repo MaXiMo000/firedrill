@@ -36,6 +36,14 @@ class ConfigError(Exception):
     """A config that cannot be honoured exactly as written."""
 
 
+_NO_TOLERANCE_YET = (
+    "{where} is not implemented yet. A tolerance is measured against the last "
+    "known-good restore, and nothing records one until history.json arrives "
+    "(PLAN.md §9 Phase 3). Refused rather than accepted-and-ignored: a key "
+    "that parses and is never read is the silent skip this loader exists to "
+    "prevent. Use min_rows for an absolute floor in the meantime."
+)
+
 # The only tier implemented. fast/sample are PLAN.md §9 Phase 2; accepting
 # either now would run a full restore and report the tier the user asked for,
 # which is a lie about what was verified.
@@ -215,9 +223,13 @@ def loads(text: str, path: pathlib.Path | None = None) -> Config:
     # -- volume ------------------------------------------------------------
     volume = _require_mapping(raw.get("volume"), "volume")
     _reject_unknown(volume, ("tolerance", "tables"), "volume")
-    volume_tolerance = (
-        parse_percent(volume["tolerance"]) if "tolerance" in volume else None
-    )
+    # A tolerance is a comparison against the last known-good restore, and
+    # nothing records one until history.json arrives in Phase 3. Parsing it and
+    # then never reading it would be precisely the silently-ignored key that
+    # _reject_unknown exists to prevent -- the rule has to bind its author too.
+    if "tolerance" in volume:
+        raise ConfigError(_NO_TOLERANCE_YET.format(where="volume.tolerance"))
+    volume_tolerance = None
 
     volume_tables: dict[str, VolumeRule] = {}
     for name, spec in _require_mapping(volume.get("tables"), "volume.tables").items():
@@ -240,10 +252,10 @@ def loads(text: str, path: pathlib.Path | None = None) -> Config:
             raise ConfigError(
                 f"volume.tables.{name}.min_rows must be a non-negative integer"
             )
-        volume_tables[str(name)] = VolumeRule(
-            min_rows=min_rows,
-            tolerance=parse_percent(spec["tolerance"]) if "tolerance" in spec else None,
-        )
+        if "tolerance" in spec:
+            raise ConfigError(
+                _NO_TOLERANCE_YET.format(where=f"volume.tables.{name}.tolerance"))
+        volume_tables[str(name)] = VolumeRule(min_rows=min_rows)
 
     # -- semantics ---------------------------------------------------------
     semantics = _parse_semantics(raw.get("semantics"))
