@@ -145,6 +145,14 @@ def build(outdir: pathlib.Path = DEFAULT_OUT) -> dict:
                     "delete from customer where id > 20;",
                 )
 
+                # -- missing_index: the healthy schema with one index gone.
+                # Right row count, right data, right sequences -- only the
+                # catalog differs, so only the structure rung may fire.
+                made["missing_index"] = _variant(
+                    src, outdir / "missing_index.dump", "missing_index",
+                    "drop index customer_email_idx;",
+                )
+
                 # -- stale_replica: the fixture that justifies the project.
                 # Every structural check passes, the row counts are right, and
                 # the newest row is a year old because the replica this was

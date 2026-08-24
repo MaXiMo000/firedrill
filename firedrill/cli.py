@@ -47,6 +47,10 @@ def build_parser() -> argparse.ArgumentParser:
                           "there is one)")
     run.add_argument("--no-config", action="store_true",
                      help="ignore any firedrill.yml that is lying around")
+    run.add_argument("--write-reference", metavar="PATH",
+                     help="write the restored catalog here as a structure "
+                          "reference, instead of comparing against one. Commit "
+                          "the result and review it like any other file.")
     run.add_argument("--quiet", action="store_true", help="suppress the table")
 
     sub.add_parser("clean", help="remove containers left behind by a crash")
@@ -86,6 +90,7 @@ def main(argv: list[str] | None = None) -> int:
     result = drill.run(
         args.dump,
         cfg=cfg,
+        write_reference=args.write_reference,
         flavour=args.image_flavour,
         rto_budget=_duration(args.rto) if args.rto else None,
         fail_on=args.fail_on,

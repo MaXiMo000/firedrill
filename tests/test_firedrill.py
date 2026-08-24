@@ -835,6 +835,88 @@ def test_integration_cli_config_changes_the_verdict_and_a_typo_does_not():
               main(["run", fixture, "--quiet", "--config", str(bad)]), 2)
 
 
+def _reference_for(fixture: str, tmp) -> pathlib.Path:
+    ref = pathlib.Path(tmp) / "reference.txt"
+    drill.run(corpus(fixture), write_reference=ref)
+    return ref
+
+
+def test_integration_structure_reference_covers_every_object_kind():
+    """Every branch of the snapshot union must be present.
+
+    This is a regression test for a silent one: the SQL was collapsed onto a
+    single line before being sent, so a `--` comment inside it commented out
+    the rest of the query. Whole branches vanished, and the result was still
+    valid rows that compared equal to themselves -- green, and blind.
+    """
+    needs_docker()
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        text = _reference_for("healthy_pg16.dump", tmp).read_text()
+        for kind in ("column", "index", "constraint", "sequence", "extension"):
+            check(f"{kind} rows survive", any(
+                line.startswith(kind + "|") for line in text.splitlines()), True)
+        check("and nothing internal leaks in", "pg_toast" in text, False)
+
+
+def test_integration_structure_reference_is_portable_across_majors():
+    """One committed reference, two major versions. PG18 materialises NOT NULL
+    as pg_constraint rows and PG16 does not; if the snapshot included them,
+    every not-null column would report as drift after a major upgrade."""
+    needs_docker()
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        ref = _reference_for("healthy_pg16.dump", tmp)
+        cfg = config.loads(f"version: 1\nstructure:\n  reference: {ref}\n")
+        for fixture in ("healthy_pg16.dump", "healthy_pg18.dump"):
+            report = drill.run(corpus(fixture), cfg=cfg)
+            check(f"{fixture} is clean against a pg16 reference",
+                  [f.rule for f in report.findings], [])
+
+
+def test_integration_missing_index_is_caught_by_structure_alone():
+    """Right rows, right data, right sequences -- only the catalog differs."""
+    needs_docker()
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        ref = _reference_for("healthy_pg16.dump", tmp)
+        cfg = config.loads(
+            f"version: 1\nstructure:\n  reference: {ref}\n" + LADDER_CONFIG.split("\n", 2)[2]
+        )
+        report = drill.run(corpus("missing_index.dump"), cfg=cfg)
+        check("rule", [f.rule for f in report.findings], ["STRUCTURE_MISSING"])
+        check("structure failed", report.stage("structure").status, drill.FAILED)
+        check("volume is satisfied", report.stage("volume").status, drill.OK)
+        check("semantics is satisfied", report.stage("semantics").status, drill.OK)
+        check("integrity is satisfied", report.stage("integrity").status, drill.OK)
+
+
+def test_integration_absent_reference_is_reported_not_passed():
+    """A comparison that could not happen is not a comparison that passed."""
+    needs_docker()
+    cfg = config.loads(
+        "version: 1\nstructure:\n  reference: /firedrill-no-such-reference.txt\n")
+    report = drill.run(corpus("healthy_pg16.dump"), cfg=cfg)
+    check("rule", [f.rule for f in report.findings],
+          ["STRUCTURE_REFERENCE_UNREADABLE"])
+    check("non-zero exit", report.exit_code, 1)
+
+
+def test_integration_write_reference_does_not_also_compare():
+    """Regenerating the reference in the same run that is judged against it
+    would be a check that can never fail."""
+    needs_docker()
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        ref = pathlib.Path(tmp) / "r.txt"
+        cfg = config.loads(f"version: 1\nstructure:\n  reference: {ref}\n")
+        report = drill.run(corpus("missing_index.dump"), cfg=cfg, write_reference=ref)
+        check("it wrote", ref.exists(), True)
+        check("and did not compare against what it just wrote",
+              [f.rule for f in report.findings], [])
+        check("the detail says so", "wrote" in report.stage("structure").detail, True)
+
+
 def test_integration_leaves_no_containers_behind():
     needs_docker()
     before = set(docker.orphans())
@@ -916,7 +998,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 74
+    FLOOR = 79
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "

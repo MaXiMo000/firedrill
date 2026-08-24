@@ -38,6 +38,129 @@ def _quote(identifier: str) -> str:
     return ".".join(f'"{part}"' for part in identifier.split("."))
 
 
+# --------------------------------------------------------------- structure --
+
+# One line per catalog object, sorted by the database so the snapshot is
+# stable, reviewable and diffable in a pull request (PLAN.md §3.7 prefers a
+# committed reference over a live production connection for exactly that
+# reason). Deliberately not `pg_dump --schema-only`: that output is enormous,
+# reorders itself between versions, and diffs badly.
+_SNAPSHOT = """
+select 'column', n.nspname||'.'||c.relname||'.'||a.attname,
+       format_type(a.atttypid, a.atttypmod)
+         || case when a.attnotnull then ' not null' else '' end
+from pg_attribute a
+join pg_class c on c.oid = a.attrelid
+join pg_namespace n on n.oid = c.relnamespace
+where c.relkind in ('r','p') and a.attnum > 0 and not a.attisdropped
+  and n.nspname !~ '^pg_' and n.nspname <> 'information_schema'
+union all
+select 'index', n.nspname||'.'||ic.relname, ''
+from pg_index i
+join pg_class ic on ic.oid = i.indexrelid
+join pg_class c on c.oid = i.indrelid
+join pg_namespace n on n.oid = c.relnamespace
+where n.nspname !~ '^pg_' and n.nspname <> 'information_schema'
+union all
+select 'constraint', n.nspname||'.'||c.relname||'.'||con.conname, con.contype::text
+from pg_constraint con
+join pg_class c on c.oid = con.conrelid
+join pg_namespace n on n.oid = c.relnamespace
+where n.nspname !~ '^pg_' and n.nspname <> 'information_schema'
+  -- contype 'n' is excluded, measured against real 16 and 18 dumps: PG18
+  -- materialises NOT NULL as pg_constraint rows and PG16 does not, so
+  -- including them made every not-null column report as drift after a major
+  -- upgrade. The fact is not lost -- the column line above already carries
+  -- 'not null' -- so this removes a duplicate representation rather than a
+  -- check, and keeps one reference usable across major versions.
+  and con.contype <> 'n'
+union all
+select 'sequence', n.nspname||'.'||c.relname, ''
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+where c.relkind = 'S' and n.nspname !~ '^pg_' and n.nspname <> 'information_schema'
+union all
+select 'extension', extname, '' from pg_extension
+order by 1, 2
+"""
+
+
+def snapshot(container, database: str) -> str:
+    """The restored database's catalog, as sorted reviewable text."""
+    # Newlines are preserved. Collapsing them onto one line turns any
+    # `--` comment in the SQL into one that swallows the rest of the
+    # query -- which happened here, silently dropping whole branches
+    # while still returning valid-looking rows. psql -c takes
+    # multi-line SQL perfectly well.
+    result = container.sql(_SNAPSHOT.strip(), database=database)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "catalog query failed")
+    lines = [line for line in result.stdout.strip().splitlines() if line]
+    return "\n".join(lines) + "\n"
+
+
+def structure(container, cfg, database: str) -> tuple[list[Finding], dict]:
+    """Diff the restored catalog against the committed reference.
+
+    A missing object is high: something in the reference did not come back. An
+    unexpected one is medium: the database has drifted from what the repo says
+    it should be, which is worth knowing but is not the same as data loss.
+    """
+    reference = cfg.structure_reference
+    try:
+        expected = reference.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [Finding(
+            stage="structure", rule="STRUCTURE_REFERENCE_UNREADABLE", severity="high",
+            message=f"the structure reference {reference} could not be read: {exc}",
+            fix="Point structure.reference at a snapshot written by "
+                "`firedrill run --write-reference PATH`. A missing reference "
+                "means the comparison did not happen, which is not a pass.",
+            evidence="",
+        )], {}
+
+    try:
+        actual = snapshot(container, database)
+    except RuntimeError as exc:
+        return [Finding(
+            stage="structure", rule="STRUCTURE_UNREADABLE", severity="high",
+            message="could not read the restored database's catalog",
+            fix="The comparison did not run, so the schema has not been checked.",
+            evidence=str(exc),
+        )], {}
+
+    want = {line for line in expected.splitlines() if line.strip()}
+    have = {line for line in actual.splitlines() if line.strip()}
+
+    findings: list[Finding] = []
+    missing = sorted(want - have)
+    unexpected = sorted(have - want)
+
+    if missing:
+        findings.append(Finding(
+            stage="structure", rule="STRUCTURE_MISSING", severity="high",
+            message=f"{len(missing)} object(s) in the reference are absent from "
+                    "the restored database",
+            fix="Something the schema snapshot says should exist did not come "
+                "back. Check whether the dump excluded it, or whether the "
+                "reference is out of date -- and update the reference in a "
+                "reviewed commit, not by hand on the machine that failed.",
+            evidence="\n".join(missing[:20]),
+        ))
+    if unexpected:
+        findings.append(Finding(
+            stage="structure", rule="STRUCTURE_UNEXPECTED", severity="medium",
+            message=f"{len(unexpected)} object(s) exist in the restored database "
+                    "and not in the reference",
+            fix="The database has drifted from the committed snapshot. Usually a "
+                "migration that landed without the reference being regenerated.",
+            evidence="\n".join(unexpected[:20]),
+        ))
+
+    return findings, {"objects": len(have), "missing": len(missing),
+                      "unexpected": len(unexpected)}
+
+
 # ------------------------------------------------------------------ volume --
 
 def volume(container, cfg, database: str) -> tuple[list[Finding], dict]:
@@ -190,7 +313,7 @@ def integrity(container, database: str) -> tuple[list[Finding], dict]:
     findings: list[Finding] = []
     checked = 0
 
-    listing = container.sql(_SEQUENCES.strip().replace("\n", " "), database=database)
+    listing = container.sql(_SEQUENCES.strip(), database=database)
     if listing.returncode != 0:
         findings.append(Finding(
             stage="integrity", rule="INTEGRITY_UNRUNNABLE", severity="high",

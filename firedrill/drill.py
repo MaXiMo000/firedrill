@@ -17,7 +17,7 @@ from .config import DEFAULT as DEFAULT_CONFIG
 from .finding import DEFAULT_FAIL_ON, Finding, should_fail, worst
 
 STAGES = ("inspect", "target", "restore", "smoke",
-          "volume", "semantics", "integrity")
+          "structure", "volume", "semantics", "integrity")
 
 OK = "ok"
 FAILED = "failed"
@@ -119,6 +119,7 @@ def _suppress(report: Report, cfg) -> Report:
 def _run(dump_path: str | pathlib.Path, *, flavour: str = "",
          rto_budget: float | None = None, fail_on: str = DEFAULT_FAIL_ON,
          pin_major: str | None = None, cfg=DEFAULT_CONFIG,
+         write_reference: str | pathlib.Path | None = None,
          ready_timeout: int = docker.DEFAULT_READY_TIMEOUT) -> Report:
     dump_path = pathlib.Path(dump_path)
     if rto_budget is None:
@@ -245,6 +246,39 @@ def _run(dump_path: str | pathlib.Path, *, flavour: str = "",
         stage("smoke").status = FAILED if smoke_findings else OK
         if info:
             stage("smoke").detail = f"{info.get('tables')} user table(s)"
+
+        # -- structure -----------------------------------------------------
+        # --write-reference writes the snapshot instead of comparing against
+        # one. Doing both would let a run regenerate the reference it is being
+        # judged against, which is a check that can never fail.
+        if write_reference is not None:
+            started = time.monotonic()
+            try:
+                pathlib.Path(write_reference).write_text(
+                    ladder.snapshot(container, restore_stage.TARGET_DB),
+                    encoding="utf-8")
+                stage("structure").status = OK
+                stage("structure").detail = f"wrote {write_reference}"
+            except (RuntimeError, OSError) as exc:
+                stage("structure").status = FAILED
+                stage("structure").detail = str(exc)
+                report.findings.append(Finding(
+                    stage="structure", rule="STRUCTURE_UNREADABLE", severity="high",
+                    message="could not write the structure reference",
+                    fix="The snapshot was not written, so nothing was recorded.",
+                    evidence=str(exc),
+                ))
+            stage("structure").seconds = time.monotonic() - started
+        elif cfg.structure_reference is not None:
+            started = time.monotonic()
+            found, info = ladder.structure(container, cfg, restore_stage.TARGET_DB)
+            report.findings.extend(found)
+            stage("structure").seconds = time.monotonic() - started
+            stage("structure").status = FAILED if found else OK
+            stage("structure").detail = f"{info.get('objects', 0)} object(s) compared"
+        else:
+            stage("structure").status = NOT_CONFIGURED
+            stage("structure").detail = "no structure.reference in the config"
 
         # -- volume --------------------------------------------------------
         # Only the rungs the config actually asked for run. The ones it did

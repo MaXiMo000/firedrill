@@ -23,6 +23,14 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
+      # Install what pyproject declares, rather than naming packages here.
+      # Phase 0 was stdlib-only and this step did not exist; Phase 1 added
+      # PyYAML and the suite failed on a clean runner while passing locally,
+      # where it happened to already be installed. Installing the project
+      # itself means the dependency list cannot drift away from CI again.
+      - name: Install the package and its declared dependencies
+        run: python -m pip install --disable-pip-version-check -e .
+
       # Linux runners can run Linux containers, so the restore tests MUST run
       # there and --require-integration fails the build if any of them skipped.
       - name: Full suite, integration required
