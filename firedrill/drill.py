@@ -163,7 +163,12 @@ def run(dump_path: str | pathlib.Path, *, flavour: str = "",
             stage("target").detail = str(exc).splitlines()[0]
             report.findings.append(Finding(
                 stage="target", rule="TARGET_UNAVAILABLE", severity="critical",
-                message=f"could not bring up postgres:{major}: {exc}",
+                # Same contract wording as the daemon-missing path above. Which
+                # of the two fired is an implementation detail; "could NOT be
+                # verified" is the promise the report makes either way, and a
+                # test that only held for one path let a real CI failure through.
+                message=f"the restore could NOT be verified: postgres:{major} "
+                        f"did not come up: {exc}",
                 fix="Without a target the restore did not happen, so nothing about "
                     "this backup has been proved.",
                 evidence=str(exc),

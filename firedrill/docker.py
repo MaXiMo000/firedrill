@@ -64,13 +64,35 @@ def docker_available() -> tuple[bool, str]:
     if shutil.which("docker") is None:
         return False, "the `docker` command is not on PATH"
     try:
-        result = _run(["docker", "info", "--format", "{{.ServerVersion}}"], timeout=30)
+        result = _run(["docker", "info", "--format", "{{.ServerVersion}}|{{.OSType}}"],
+                      timeout=30)
     except (subprocess.TimeoutExpired, OSError) as exc:
         return False, f"`docker info` did not complete: {exc}"
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip().splitlines()
         return False, detail[-1] if detail else "`docker info` failed"
-    return True, result.stdout.strip()
+
+    server_version, _, os_type = result.stdout.strip().partition("|")
+
+    # Measured on the ubuntu-24.04 runner: with an unreachable daemon,
+    # `docker info --format ...` exits 0 and prints an empty server version.
+    # Trusting the exit code therefore reported a dead daemon as usable, and
+    # the drill fell through to the container-start path instead of saying it
+    # could not verify anything. This tool exists to distrust exactly that kind
+    # of exit code, so the probe checks the capability, not the status.
+    if not server_version:
+        return False, ("`docker info` returned no server version, so the daemon "
+                       "is not reachable")
+
+    # A Windows daemon in Windows-container mode answers `docker info` happily
+    # and then cannot pull a linux-only postgres image. Unusable is the honest
+    # answer, and it makes the container tests skip by name rather than die
+    # halfway through with a pull error.
+    if os_type and os_type != "linux":
+        return False, (f"the docker daemon is in {os_type}-container mode; the "
+                       "postgres images firedrill restores into are linux-only")
+
+    return True, server_version
 
 
 def image_for(major: str, flavour: str = "") -> str:

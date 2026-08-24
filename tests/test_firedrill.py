@@ -394,6 +394,55 @@ def test_cli_run_on_missing_file_fails_loudly():
     check("non-zero", code, 1)
 
 
+# ------------------------------------------------- the availability probe ---
+# `docker info` does not answer "can you run a linux postgres container?", and
+# these three pin the gap between what it reports and what we need to know.
+# Found by the first CI run on a real ubuntu-24.04 runner, where an unreachable
+# daemon exited 0 and the probe called it usable.
+
+def _stub_docker_info(returncode: int, stdout: str):
+    """Replace docker._run for one probe call. Returns the restore callable."""
+    original = docker._run
+    docker._run = lambda *a, **k: subprocess.CompletedProcess(
+        args=["docker", "info"], returncode=returncode, stdout=stdout, stderr=""
+    )
+    return lambda: setattr(docker, "_run", original)
+
+
+def test_probe_rejects_an_empty_server_version():
+    """Exit code 0 with no server version is a dead daemon, not a live one."""
+    restore_run = _stub_docker_info(0, "|linux\n")
+    try:
+        usable, why = docker.docker_available()
+    finally:
+        restore_run()
+    check("not usable", usable, False)
+    check("and says why", "no server version" in why, True)
+
+
+def test_probe_rejects_windows_container_mode():
+    """A Windows daemon answers happily and cannot pull a linux image."""
+    restore_run = _stub_docker_info(0, "29.1.2|windows\n")
+    try:
+        usable, why = docker.docker_available()
+    finally:
+        restore_run()
+    check("not usable", usable, False)
+    check("names the mode", "windows-container mode" in why, True)
+
+
+def test_probe_accepts_a_linux_daemon():
+    """The other direction, which costs exactly as much to get wrong: a healthy
+    linux daemon must not be rejected, or every restore silently stops running."""
+    restore_run = _stub_docker_info(0, "29.1.2|linux\n")
+    try:
+        usable, why = docker.docker_available()
+    finally:
+        restore_run()
+    check("usable", usable, True)
+    check("reports the server version", why, "29.1.2")
+
+
 # --------------------------------------------------------- integration ------
 # These need Docker. They skip explicitly and are counted; CI passes
 # --require-integration on Linux so a skip there fails the build.
@@ -450,6 +499,17 @@ def test_integration_plain_sql_is_rejected():
     needs_docker()
     report = drill.run(corpus("not_an_archive.sql"))
     check("rule", [f.rule for f in report.findings], ["ARCHIVE_UNREADABLE"])
+
+
+def test_integration_probe_reads_a_real_daemon():
+    """The stubs above prove the branching; this proves the format string still
+    parses on a real `docker info`. A typo there would make every probe return
+    an empty server version and skip every restore -- green, and worthless."""
+    needs_docker()
+    usable, why = docker.docker_available()
+    check("a real daemon is usable", usable, True)
+    check("and the reason field carries a version, not an empty string",
+          bool(why.strip()), True)
 
 
 def test_integration_leaves_no_containers_behind():
@@ -533,7 +593,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 40
+    FLOOR = 50
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "
