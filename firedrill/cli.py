@@ -11,16 +11,8 @@ import argparse
 import sys
 
 from . import __version__, docker, drill, report as reporting
+from .config import parse_duration as _duration
 from .finding import SEVERITIES
-
-
-def _duration(text: str) -> float:
-    """'45m', '90s', '2h', or bare seconds."""
-    text = text.strip().lower()
-    units = {"s": 1, "m": 60, "h": 3600}
-    if text and text[-1] in units:
-        return float(text[:-1]) * units[text[-1]]
-    return float(text)
 
 
 def build_parser() -> argparse.ArgumentParser:

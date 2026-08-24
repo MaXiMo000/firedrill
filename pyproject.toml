@@ -23,7 +23,7 @@ classifiers = [
 # in pure Python and every database operation happens inside the target
 # container, so there is no host Postgres client and no driver to install.
 # psycopg arrives in Phase 1 with the checks that actually need a connection.
-dependencies = []
+dependencies = ["PyYAML>=6.0"]
 
 urls.Source = "https://github.com/MaXiMo000/firedrill"
 urls.Issues = "https://github.com/MaXiMo000/firedrill/issues"

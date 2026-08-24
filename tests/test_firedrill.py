@@ -24,7 +24,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from firedrill import archive, docker, drill, report as reporting, restore
+from firedrill import archive, config, docker, drill, report as reporting, restore
 from firedrill.cli import _duration, build_parser
 from firedrill.finding import (
     Finding, SEVERITIES, forget_secrets, redact, register_secret, should_fail, worst,
@@ -394,6 +394,184 @@ def test_cli_run_on_missing_file_fails_loudly():
     check("non-zero", code, 1)
 
 
+# -------------------------------------------------------------- config ------
+
+GOOD_CONFIG = """
+version: 1
+target:
+  type: docker
+tier: full
+rto_budget: 45m
+structure:
+  reference: schema/production.sql
+volume:
+  tolerance: 10%
+  tables:
+    orders: {min_rows: 1}
+    audit_log: {tolerance: 50%}
+semantics:
+  - name: recent orders exist
+    sql: SELECT count(*) FROM orders WHERE created_at > now() - interval '7 days'
+    expect: "> 0"
+ignore:
+  - check: COLLATION_MISMATCH
+    reason: "tracked in DR-114"
+"""
+
+
+def _rejects(label: str, text: str, expect_phrase: str = ""):
+    """Assert a config is refused, and that the message explains why."""
+    try:
+        config.loads(text)
+    except config.ConfigError as exc:
+        if expect_phrase:
+            check(f"{label}: message explains", expect_phrase in str(exc), True)
+        return
+    FAILURES.append(f"  {label}\n    expected ConfigError\n    got      accepted")
+
+
+def test_config_reads_the_documented_example():
+    """The other direction. A loader that rejects PLAN.md §6's own example is
+    exactly as broken as one that accepts nonsense."""
+    cfg = config.loads(GOOD_CONFIG)
+    check("tier", cfg.tier, "full")
+    check("rto in seconds", cfg.rto_budget, 2700.0)
+    check("reference", str(cfg.structure_reference), "schema/production.sql")
+    check("global tolerance", cfg.volume_tolerance, 0.10)
+    check("per-table min_rows", cfg.volume_tables["orders"].min_rows, 1)
+    check("per-table tolerance", cfg.volume_tables["audit_log"].tolerance, 0.50)
+    check("one semantic check", len(cfg.semantics), 1)
+    check("operator", cfg.semantics[0].op, ">")
+    check("threshold", cfg.semantics[0].threshold, 0)
+    check("ignore is recorded with its reason",
+          cfg.ignore["COLLATION_MISMATCH"], "tracked in DR-114")
+
+
+def test_config_semantic_check_evaluates_both_ways():
+    cfg = config.loads(GOOD_CONFIG)
+    rule = cfg.semantics[0]
+    check("5 > 0 holds", rule.holds(5), True)
+    check("0 > 0 does not", rule.holds(0), False)
+
+
+def test_config_ignore_without_a_reason_is_an_error():
+    """PLAN.md §6: an unexplained suppression is a config error, not a warning."""
+    _rejects("no reason key", """
+version: 1
+ignore:
+  - check: COLLATION_MISMATCH
+""", "no written reason")
+    _rejects("blank reason", """
+version: 1
+ignore:
+  - check: COLLATION_MISMATCH
+    reason: "   "
+""", "no written reason")
+
+
+def test_config_unknown_key_is_an_error_not_a_warning():
+    """A typo'd key that loads silently means a check the user believes is
+    running is not running, and the run still goes green."""
+    _rejects("misspelled top level", """
+version: 1
+volumes:
+  tolerance: 10%
+""", "unknown key")
+    _rejects("misspelled nested", """
+version: 1
+volume:
+  tolerence: 10%
+""", "unknown key")
+
+
+def test_config_expect_must_be_a_comparison_not_a_row():
+    """PLAN.md §7 enforced by the schema: there is no way to write a check
+    whose result is echoed verbatim."""
+    for bad in ("the newest order", "SELECT email FROM app_user", "> ", "0"):
+        _rejects(f"expect {bad!r}", f"""
+version: 1
+semantics:
+  - name: x
+    sql: select count(*) from t
+    expect: "{bad}"
+""", "comparison against a number")
+
+
+def test_config_refuses_multiple_statements_in_one_check():
+    _rejects("two statements", """
+version: 1
+semantics:
+  - name: x
+    sql: "select count(*) from t; drop table t"
+    expect: "> 0"
+""", "more than one statement")
+
+
+def test_config_trailing_semicolon_is_fine():
+    """One statement written with a terminator is not two statements. Refusing
+    it would be a false positive, which costs what a false negative costs."""
+    cfg = config.loads("""
+version: 1
+semantics:
+  - name: x
+    sql: "select count(*) from t;"
+    expect: ">= 1"
+""")
+    check("accepted", len(cfg.semantics), 1)
+    check("terminator stripped", cfg.semantics[0].sql.endswith("t"), True)
+
+
+def test_config_unimplemented_tier_is_refused_not_silently_upgraded():
+    """A report saying 'fast' when a full restore ran is a lie about what was
+    verified, and so is the reverse."""
+    _rejects("fast", "version: 1\ntier: fast\n", "not implemented yet")
+    _rejects("sample", "version: 1\ntier: sample\n", "not implemented yet")
+    _rejects("nonsense", "version: 1\ntier: turbo\n", "must be one of")
+
+
+def test_config_dsn_target_is_refused_until_its_interlocks_exist():
+    _rejects("dsn", "version: 1\ntarget:\n  type: dsn\n", "four interlocks")
+
+
+def test_config_version_must_be_stated():
+    _rejects("missing", "tier: full\n", "version")
+    _rejects("wrong", "version: 2\n", "version")
+
+
+def test_config_empty_file_is_an_error():
+    _rejects("empty", "\n", "empty")
+
+
+def test_config_tolerance_requires_a_percent_sign():
+    _rejects("bare number", "version: 1\nvolume:\n  tolerance: 10\n", "ambiguous")
+    check("percent parses", config.parse_percent("50%"), 0.50)
+
+
+def test_config_empty_table_rule_is_an_error():
+    _rejects("checks nothing", """
+version: 1
+volume:
+  tables:
+    orders: {}
+""", "checks nothing")
+
+
+def test_config_duplicate_semantic_names_are_refused():
+    _rejects("same name twice", """
+version: 1
+semantics:
+  - {name: x, sql: select 1, expect: "> 0"}
+  - {name: x, sql: select 2, expect: "> 0"}
+""", "ambiguous")
+
+
+def test_config_defaults_when_there_is_no_file():
+    cfg = config.DEFAULT
+    check("tier", cfg.tier, "full")
+    check("no semantics", cfg.semantics, ())
+    check("nothing ignored", cfg.is_ignored("ANYTHING"), False)
+
+
 # ------------------------------------------------- the availability probe ---
 # `docker info` does not answer "can you run a linux postgres container?", and
 # these three pin the gap between what it reports and what we need to know.
@@ -593,7 +771,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 50
+    FLOOR = 65
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "
