@@ -1,0 +1,121 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        # 3.10 is the floor declared in pyproject. Test the floor, not just today.
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      # Linux runners can run Linux containers, so the restore tests MUST run
+      # there and --require-integration fails the build if any of them skipped.
+      - name: Full suite, integration required
+        if: runner.os == 'Linux'
+        run: python tests/test_firedrill.py --require-integration
+
+      # Windows runners cannot run Linux containers at all, so the container
+      # tests genuinely cannot execute. They skip by name and are counted --
+      # the run prints how many, so "it passed" and "it did not run" stay
+      # distinguishable. Everything version-independent (the archive header
+      # parser, the stderr classifier, the report logic) still runs here,
+      # which is where path and subprocess handling actually breaks.
+      - name: Pure suite, container tests skip and say so
+        if: runner.os == 'Windows'
+        run: python tests/test_firedrill.py
+
+  dogfood:
+    # The claim has to hold on every commit, not at release time.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+      - run: pip install carabiner-sec
+      - name: carabiner scans firedrill
+        run: carabiner scan --all --fail-on low --sarif firedrill.sarif
+      - name: Upload to the Security tab
+        uses: github/codeql-action/upload-sarif@c16c0f3f2812ec4bb3750a5ed64873fe2ce0fbef  # codeql-bundle-v2.26.3
+        with:
+          sarif_file: firedrill.sarif
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Build
+        run: docker build -t firedrill:ci .
+      - name: It runs, as a non-root user
+        run: |
+          set -euo pipefail
+          test "$(docker run --rm --entrypoint id firedrill:ci -u)" = "10001"
+          docker run --rm firedrill:ci --version
+      - name: It reports an unreadable archive rather than passing
+        # Deliberately a fixture that fails before any container is needed, so
+        # this step tests the packaged CLI and not docker-in-docker.
+        run: |
+          set -euo pipefail
+          printf 'PGDMP\x01\x0f\x00\x04\x08\x01' > /tmp/truncated.dump
+          out=$(docker run --rm -v /tmp/truncated.dump:/tmp/truncated.dump:ro \
+                  firedrill:ci run /tmp/truncated.dump || true)
+          echo "$out"
+          echo "$out" | grep -q ARCHIVE_UNREADABLE
+          echo "$out" | grep -q "COULD NOT VERIFY"
+      - name: And exits non-zero when it could not verify
+        run: |
+          set -euo pipefail
+          printf 'PGDMP\x01\x0f\x00\x04\x08\x01' > /tmp/truncated.dump
+          if docker run --rm -v /tmp/truncated.dump:/tmp/truncated.dump:ro \
+               firedrill:ci run /tmp/truncated.dump --quiet; then
+            echo "exited 0 on an unverifiable backup"; exit 1
+          fi
+
+  package:
+    # Build and install on every commit, not only at release. A packaging break
+    # that only surfaces during a release is a break discovered at the worst time.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+      - run: pip install build && python -m build
+      - name: Install the wheel and run it as a user would
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/v
+          /tmp/v/bin/pip install --disable-pip-version-check -q dist/*.whl
+          /tmp/v/bin/firedrill --help > /dev/null
+          /tmp/v/bin/firedrill --version
+          # The installed package must agree with pyproject about its version.
+          test "$(/tmp/v/bin/python -c 'import firedrill; print(firedrill.__version__)')" \
+             = "$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)"
+      - name: A real restore, driven by the installed console script
+        run: |
+          set -euo pipefail
+          python tests/make_corpus.py /tmp/corpus
+          /tmp/v/bin/firedrill run /tmp/corpus/healthy_pg16.dump --json /tmp/r.json
+          test "$(python -c 'import json;print(json.load(open("/tmp/r.json"))["ok"])')" = "True"
+          # And the inverse, which matters exactly as much.
+          if /tmp/v/bin/firedrill run /tmp/corpus/truncated_data.dump --quiet; then
+            echo "a truncated backup exited 0"; exit 1
+          fi

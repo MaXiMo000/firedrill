@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+dist/
+build/
+*.egg-info/
+.venv/
+tests/corpus/
+*.dump
+
+# A `git add .` away from a credential in history. A secret removed in a later
+# commit is still in the pack file and still needs rotating.
+.env
+.env.*
+*.pem
+*.key

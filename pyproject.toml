@@ -1,0 +1,42 @@
+[project]
+name = "firedrill"
+version = "0.1.0"
+description = "A backup you have not restored is not a backup. firedrill restores it and proves it is usable."
+requires-python = ">=3.10"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["postgres", "postgresql", "backup", "restore", "disaster-recovery",
+            "rto", "pg_dump", "pg_restore", "verification", "ci"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Database",
+    "Topic :: System :: Archiving :: Backup",
+    "Topic :: System :: Recovery Tools",
+]
+# Phase 0 is the standard library and nothing else. The archive header is parsed
+# in pure Python and every database operation happens inside the target
+# container, so there is no host Postgres client and no driver to install.
+# psycopg arrives in Phase 1 with the checks that actually need a connection.
+dependencies = []
+
+urls.Source = "https://github.com/MaXiMo000/firedrill"
+urls.Issues = "https://github.com/MaXiMo000/firedrill/issues"
+urls.Changelog = "https://github.com/MaXiMo000/firedrill/releases"
+
+[project.scripts]
+firedrill = "firedrill.cli:main"
+
+# Named explicitly. Auto-discovery breaks the moment a second top-level
+# directory appears, and it breaks at release time rather than in CI.
+[tool.setuptools.packages.find]
+include = ["firedrill*"]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
