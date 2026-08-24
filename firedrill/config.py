@@ -45,6 +45,13 @@ ALL_TIERS = ("fast", "sample", "full")
 _EXPECT = re.compile(r"^\s*(==|!=|>=|<=|>|<)\s*(-?\d+)\s*$")
 _PERCENT = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*%\s*$")
 
+# A table name is interpolated into a count query, so it is constrained to a
+# plain (optionally schema-qualified) identifier here rather than escaped
+# later. Refusing the exotic-but-legal cases costs a user with a table called
+# "my table" one rename; accepting them costs a quoting bug in a tool that
+# runs SQL against a database.
+_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*(\.[A-Za-z_][A-Za-z0-9_$]*)?$")
+
 _OPS = {
     "==": lambda a, b: a == b,
     "!=": lambda a, b: a != b,
@@ -216,6 +223,12 @@ def loads(text: str, path: pathlib.Path | None = None) -> Config:
     for name, spec in _require_mapping(volume.get("tables"), "volume.tables").items():
         spec = _require_mapping(spec, f"volume.tables.{name}")
         _reject_unknown(spec, ("min_rows", "tolerance"), f"volume.tables.{name}")
+        if not _IDENT.match(str(name)):
+            raise ConfigError(
+                f"volume.tables.{name!r} is not a plain table name. Use `orders` "
+                "or `public.orders`; the name goes into a count query, so it is "
+                "restricted here rather than escaped later."
+            )
         if not spec:
             raise ConfigError(
                 f"volume.tables.{name} sets nothing. Give it min_rows or a "

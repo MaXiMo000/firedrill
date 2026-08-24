@@ -336,6 +336,33 @@ def test_human_report_marks_stages_that_did_not_run():
     check("not-run stages are visible", "----" in text, True)
 
 
+def test_human_report_renders_every_stage_status():
+    """A KeyError here took out `firedrill run` on its default path -- no
+    config means two rungs are 'not configured', and the reporter had no mark
+    for it. The report is how every other failure gets communicated, so it is
+    the last thing that may crash."""
+    report = _blank_report(verified=True)
+    statuses = [drill.OK, drill.FAILED, drill.NOT_RUN, drill.NOT_CONFIGURED,
+                "a status from a later phase"]
+    for stage, status in zip(report.stages, statuses):
+        stage.status = status
+    text = reporting.human(report)
+    check("not configured is marked", "n/a" in text, True)
+    check("an unknown status stays visible instead of crashing",
+          "????" in text, True)
+
+
+def test_human_report_prints_what_was_suppressed_and_why():
+    """A green run must always show what was set aside to make it green."""
+    report = _blank_report(verified=True)
+    report.suppressed = [{"rule": "COLLATION_MISMATCH", "severity": "high",
+                          "reason": "alpine vs debian, tracked in DR-114",
+                          "message": "m"}]
+    text = reporting.human(report)
+    check("names the rule", "COLLATION_MISMATCH" in text, True)
+    check("and prints the written reason", "DR-114" in text, True)
+
+
 def test_report_json_round_trips():
     report = _blank_report(verified=True, findings=[Finding("s", "R", "low", "m")])
     parsed = json.loads(reporting.as_json(report))
@@ -690,6 +717,124 @@ def test_integration_probe_reads_a_real_daemon():
           bool(why.strip()), True)
 
 
+# The Phase 1 ladder, asserted against real broken backups. Every fixture
+# below restores with zero pg_restore findings -- that is measured, not
+# assumed -- so each of these is a failure that only a restored database can
+# show you.
+
+LADDER_CONFIG = """
+version: 1
+volume:
+  tables:
+    customer: {min_rows: 1000}
+semantics:
+  - name: recent customers exist
+    sql: select count(*) from customer where created_at > now() - interval '7 days'
+    expect: "> 0"
+"""
+
+
+def _ladder_run(fixture: str):
+    return drill.run(corpus(fixture), cfg=config.loads(LADDER_CONFIG))
+
+
+def test_integration_healthy_passes_every_rung():
+    """The most important assertion in the suite. A DR tool that cries wolf
+    gets muted, and a muted DR tool is worse than none."""
+    needs_docker()
+    report = _ladder_run("healthy_pg16.dump")
+    check("zero findings", [f.rule for f in report.findings], [])
+    check("exit 0", report.exit_code, 0)
+    for rung in ("volume", "semantics", "integrity"):
+        check(f"{rung} ran and passed", report.stage(rung).status, drill.OK)
+
+
+def test_integration_volume_drop_is_caught_by_volume_alone():
+    """99% of rows gone. Restores clean, passes every structural check."""
+    needs_docker()
+    report = _ladder_run("volume_drop.dump")
+    check("rule", [f.rule for f in report.findings], ["VOLUME_BELOW_MINIMUM"])
+    check("volume failed", report.stage("volume").status, drill.FAILED)
+    check("and the other rungs did not", report.stage("semantics").status, drill.OK)
+    check("nor integrity", report.stage("integrity").status, drill.OK)
+    check("exit 1", report.exit_code, 1)
+
+
+def test_integration_stale_replica_is_caught_by_semantics_alone():
+    """PLAN.md §8: the fixture that justifies the whole project. The schema is
+    right, the row count is right, and the data is a year old."""
+    needs_docker()
+    report = _ladder_run("stale_replica.dump")
+    check("rule", [f.rule for f in report.findings], ["SEMANTICS_FAILED"])
+    check("volume is satisfied", report.stage("volume").status, drill.OK)
+    check("integrity is satisfied", report.stage("integrity").status, drill.OK)
+    check("only semantics caught it", report.stage("semantics").status, drill.FAILED)
+
+
+def test_integration_sequence_behind_is_caught_by_integrity_alone():
+    """setval below max(id): the first insert after failover raises a
+    duplicate key, and nothing before this rung would have told you."""
+    needs_docker()
+    report = _ladder_run("sequence_behind.dump")
+    check("rule", [f.rule for f in report.findings], ["SEQUENCE_BEHIND"])
+    check("integrity failed", report.stage("integrity").status, drill.FAILED)
+    check("volume is satisfied", report.stage("volume").status, drill.OK)
+    check("semantics is satisfied", report.stage("semantics").status, drill.OK)
+
+
+def test_integration_unconfigured_rungs_say_so_rather_than_passing():
+    """With no config, volume and semantics have nothing to check. They must
+    report 'not configured', which is not a tick."""
+    needs_docker()
+    report = drill.run(corpus("healthy_pg16.dump"))
+    check("volume", report.stage("volume").status, drill.NOT_CONFIGURED)
+    check("semantics", report.stage("semantics").status, drill.NOT_CONFIGURED)
+    check("integrity needs no config and still runs",
+          report.stage("integrity").status, drill.OK)
+    check("and the run is still green", report.exit_code, 0)
+
+
+def test_integration_ignore_suppresses_with_its_reason_recorded():
+    """A suppressed finding is moved aside under its written reason, not
+    deleted. The config must not be a way to make problems invisible."""
+    needs_docker()
+    cfg = config.loads(LADDER_CONFIG + """
+ignore:
+  - check: VOLUME_BELOW_MINIMUM
+    reason: "this fixture is deliberately small; tracked in TEST-1"
+""")
+    report = drill.run(corpus("volume_drop.dump"), cfg=cfg)
+    check("no findings remain", [f.rule for f in report.findings], [])
+    check("exit 0 now", report.exit_code, 0)
+    check("but it is recorded", [s["rule"] for s in report.suppressed],
+          ["VOLUME_BELOW_MINIMUM"])
+    check("with the reason", "TEST-1" in report.suppressed[0]["reason"], True)
+
+
+def test_integration_cli_config_changes_the_verdict_and_a_typo_does_not():
+    """Three runs of one backup, which together are the argument for the whole
+    config file: configured, it is caught; unconfigured, the same broken
+    backup exits 0; and a typo'd config is refused rather than silently
+    degrading into that second case."""
+    needs_docker()
+    import tempfile
+    from firedrill.cli import main
+    fixture = str(corpus("stale_replica.dump"))
+    with tempfile.TemporaryDirectory() as tmp:
+        good = pathlib.Path(tmp) / "firedrill.yml"
+        good.write_text(LADDER_CONFIG.replace(
+            "min_rows: 1000", "min_rows: 1"), encoding="utf-8")
+        bad = pathlib.Path(tmp) / "bad.yml"
+        bad.write_text("version: 1\nvolume:\n  tolerence: 10%\n", encoding="utf-8")
+
+        check("configured: caught",
+              main(["run", fixture, "--quiet", "--config", str(good)]), 1)
+        check("unconfigured: the same backup looks fine",
+              main(["run", fixture, "--quiet", "--no-config"]), 0)
+        check("a typo'd config is refused, not degraded",
+              main(["run", fixture, "--quiet", "--config", str(bad)]), 2)
+
+
 def test_integration_leaves_no_containers_behind():
     needs_docker()
     before = set(docker.orphans())
@@ -771,7 +916,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 65
+    FLOOR = 74
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "

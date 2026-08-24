@@ -32,6 +32,16 @@ HEADERS_OUT = HERE / "headers"
 VERSIONS = ("16", "18")
 
 
+# One schema, shared by the healthy fixture and every broken variant of it.
+# The variants must differ from healthy in exactly one respect, or a test that
+# claims to catch a stale replica might really be catching a schema difference.
+SCHEMA = ("create table customer(id serial primary key, email text not null,"
+          " created_at timestamptz default now());")
+SEED = ("insert into customer(email)"
+        " select 'user'||g||'@example.test' from generate_series(1,2000) g;")
+INDEX = "create index on customer(email);"
+
+
 def sh(*args, check=True, **kw):
     result = subprocess.run(args, capture_output=True, text=True, **kw)
     if check and result.returncode != 0:
@@ -77,6 +87,18 @@ class Source:
         return dest
 
 
+def _variant(src: "Source", dest: pathlib.Path, dbname: str, mutation: str):
+    """The healthy schema in its own database, broken in exactly one way.
+
+    Built from the same SCHEMA/SEED/INDEX as healthy rather than cloned with
+    `template postgres`, which cannot run while we are connected to postgres.
+    """
+    src.psql(f"create database {dbname};")
+    for statement in (SCHEMA, SEED, INDEX, mutation):
+        src.psql(statement, db=dbname)
+    return src.dump(dest, db=dbname)
+
+
 def build(outdir: pathlib.Path = DEFAULT_OUT) -> dict:
     outdir.mkdir(parents=True, exist_ok=True)
     HEADERS_OUT.mkdir(parents=True, exist_ok=True)
@@ -85,15 +107,8 @@ def build(outdir: pathlib.Path = DEFAULT_OUT) -> dict:
     for major in VERSIONS:
         with Source(major) as src:
             # -- healthy: the important one. Must produce zero findings.
-            src.psql(
-                "create table customer(id serial primary key, email text not null,"
-                " created_at timestamptz default now());"
-            )
-            src.psql(
-                "insert into customer(email)"
-                " select 'user'||g||'@example.test' from generate_series(1,2000) g;"
-            )
-            src.psql("create index on customer(email);")
+            for statement in (SCHEMA, SEED, INDEX):
+                src.psql(statement)
             healthy = src.dump(outdir / f"healthy_pg{major}.dump")
             made[f"healthy_pg{major}"] = healthy
 
@@ -122,6 +137,30 @@ def build(outdir: pathlib.Path = DEFAULT_OUT) -> dict:
                     outdir / "not_an_archive.sql", plain=True
                 )
 
+                # -- volume_drop: the healthy schema with 99% of the rows gone.
+                # Restores perfectly and passes every structural check. This is
+                # what a dump of a partially-truncated table looks like.
+                made["volume_drop"] = _variant(
+                    src, outdir / "volume_drop.dump", "volume_drop",
+                    "delete from customer where id > 20;",
+                )
+
+                # -- stale_replica: the fixture that justifies the project.
+                # Every structural check passes, the row counts are right, and
+                # the newest row is a year old because the replica this was
+                # dumped from stopped replicating.
+                made["stale_replica"] = _variant(
+                    src, outdir / "stale_replica.dump", "stale_replica",
+                    "update customer set created_at = now() - interval '1 year';",
+                )
+
+                # -- sequence_behind: setval below max(id). Restores clean, and
+                # the first insert after failover raises a duplicate key.
+                made["sequence_behind"] = _variant(
+                    src, outdir / "sequence_behind.dump", "sequence_behind",
+                    "select setval('customer_id_seq', 5, true);",
+                )
+
     # -- truncations, derived from the healthy dump at three depths. They land
     # in different stages on purpose: the header one never reaches a container,
     # the data one restores a schema with no rows in it.
@@ -145,11 +184,12 @@ def build(outdir: pathlib.Path = DEFAULT_OUT) -> dict:
 
 # Deferred to the phase that adds the check which reads them:
 #   missing_extension   -> target image with the extension's control file removed
-#   stale_replica       -> healthy dump whose newest row predates the window
-#   sequence_behind     -> setval() below max(id) before dumping
 #   collation_mismatch  -> source and target on different libc
-#   wrong_major_version -> dump from N restored into a pinned N-1 container
-#   volume_drop         -> healthy schema, most rows deleted before the dump
+# Both need a purpose-built target image rather than a purpose-built dump, so
+# they arrive with the check that reads them rather than sitting here unread.
+#
+# wrong_major_version needs no fixture: healthy_pg18 restored into a pinned 16
+# container is the case, and drill.run(pin_major=...) already expresses it.
 
 
 def main() -> int:

@@ -12,14 +12,21 @@ import dataclasses
 import pathlib
 import time
 
-from . import archive, docker, restore as restore_stage
+from . import archive, docker, ladder, restore as restore_stage
+from .config import DEFAULT as DEFAULT_CONFIG
 from .finding import DEFAULT_FAIL_ON, Finding, should_fail, worst
 
-STAGES = ("inspect", "target", "restore", "smoke")
+STAGES = ("inspect", "target", "restore", "smoke",
+          "volume", "semantics", "integrity")
 
 OK = "ok"
 FAILED = "failed"
 NOT_RUN = "not run"
+
+# Distinct from NOT_RUN on purpose. "Nothing in the config asked for this" and
+# "this was asked for and could not run" are different facts about a report,
+# and collapsing either into "ok" is how a tool claims coverage it lacks.
+NOT_CONFIGURED = "not configured"
 
 
 @dataclasses.dataclass
@@ -40,6 +47,7 @@ class Report:
     total_seconds: float = 0.0
     rto_budget: float | None = None
     fail_on: str = DEFAULT_FAIL_ON
+    suppressed: list = dataclasses.field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -71,14 +79,50 @@ class Report:
                 for s in self.stages
             ],
             "findings": [f.as_dict() for f in self.findings],
+            "suppressed": self.suppressed,
         }
 
 
-def run(dump_path: str | pathlib.Path, *, flavour: str = "",
-        rto_budget: float | None = None, fail_on: str = DEFAULT_FAIL_ON,
-        pin_major: str | None = None,
-        ready_timeout: int = docker.DEFAULT_READY_TIMEOUT) -> Report:
+def run(dump_path: str | pathlib.Path, *, cfg=None, **kw) -> Report:
+    """Drill the backup, then apply the config's suppressions.
+
+    Suppression happens here, in one place, rather than at each of the five
+    points _run can return from. A missed return would silently un-suppress a
+    finding, or worse, suppress one the user never asked to hide.
+    """
+    cfg = cfg if cfg is not None else DEFAULT_CONFIG
+    return _suppress(_run(dump_path, cfg=cfg, **kw), cfg)
+
+
+def _suppress(report: Report, cfg) -> Report:
+    """Move ignored findings aside -- recorded with their reason, not deleted.
+
+    A suppressed finding still appears in the report, under the reason its
+    author wrote (PLAN.md §6). Deleting it outright would make the config a
+    way to make problems invisible, which is the opposite of the point.
+    """
+    kept = []
+    for finding in report.findings:
+        if cfg.is_ignored(finding.rule):
+            report.suppressed.append({
+                "rule": finding.rule,
+                "severity": finding.severity,
+                "reason": cfg.reason_for(finding.rule),
+                "message": finding.message,
+            })
+        else:
+            kept.append(finding)
+    report.findings = kept
+    return report
+
+
+def _run(dump_path: str | pathlib.Path, *, flavour: str = "",
+         rto_budget: float | None = None, fail_on: str = DEFAULT_FAIL_ON,
+         pin_major: str | None = None, cfg=DEFAULT_CONFIG,
+         ready_timeout: int = docker.DEFAULT_READY_TIMEOUT) -> Report:
     dump_path = pathlib.Path(dump_path)
+    if rto_budget is None:
+        rto_budget = cfg.rto_budget
     stages = [Stage(name) for name in STAGES]
     report = Report(dump=str(dump_path), stages=stages, findings=[], archive={},
                     rto_budget=rto_budget, fail_on=fail_on)
@@ -201,6 +245,43 @@ def run(dump_path: str | pathlib.Path, *, flavour: str = "",
         stage("smoke").status = FAILED if smoke_findings else OK
         if info:
             stage("smoke").detail = f"{info.get('tables')} user table(s)"
+
+        # -- volume --------------------------------------------------------
+        # Only the rungs the config actually asked for run. The ones it did
+        # not ask for say "not configured", which is the honest thing for a
+        # report to say and is not the same as a tick.
+        if cfg.volume_tables:
+            started = time.monotonic()
+            found, info = ladder.volume(container, cfg, restore_stage.TARGET_DB)
+            report.findings.extend(found)
+            stage("volume").seconds = time.monotonic() - started
+            stage("volume").status = FAILED if found else OK
+            stage("volume").detail = f"{len(info.get('counts', {}))} table(s) counted"
+        else:
+            stage("volume").status = NOT_CONFIGURED
+            stage("volume").detail = "no volume rules in the config"
+
+        # -- semantics -----------------------------------------------------
+        if cfg.semantics:
+            started = time.monotonic()
+            found, info = ladder.semantics(container, cfg, restore_stage.TARGET_DB)
+            report.findings.extend(found)
+            stage("semantics").seconds = time.monotonic() - started
+            stage("semantics").status = FAILED if found else OK
+            stage("semantics").detail = f"{len(cfg.semantics)} check(s)"
+        else:
+            stage("semantics").status = NOT_CONFIGURED
+            stage("semantics").detail = "no semantics checks in the config"
+
+        # -- integrity -----------------------------------------------------
+        # This one needs no configuration: the questions it asks are the same
+        # for every database, so it always runs.
+        started = time.monotonic()
+        found, info = ladder.integrity(container, restore_stage.TARGET_DB)
+        report.findings.extend(found)
+        stage("integrity").seconds = time.monotonic() - started
+        stage("integrity").status = FAILED if found else OK
+        stage("integrity").detail = f"{info.get('sequences', 0)} sequence(s)"
     finally:
         # PLAN.md §7: teardown in a finally, always.
         container.teardown()

@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import __version__, docker, drill, report as reporting
+from . import __version__, config, docker, drill, report as reporting
 from .config import parse_duration as _duration
 from .finding import SEVERITIES
 
@@ -42,6 +42,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--ready-timeout", type=int,
                      default=docker.DEFAULT_READY_TIMEOUT,
                      help="seconds to wait for the container (default: %(default)s)")
+    run.add_argument("--config", metavar="PATH",
+                     help="firedrill.yml to read (default: one beside you, if "
+                          "there is one)")
+    run.add_argument("--no-config", action="store_true",
+                     help="ignore any firedrill.yml that is lying around")
     run.add_argument("--quiet", action="store_true", help="suppress the table")
 
     sub.add_parser("clean", help="remove containers left behind by a crash")
@@ -61,8 +66,26 @@ def main(argv: list[str] | None = None) -> int:
               + (": " + ", ".join(removed) if removed else ""))
         return 0
 
+    # An explicitly named config that cannot be read is a hard error. Falling
+    # back to defaults would run a weaker set of checks than the user asked
+    # for and still print a pass.
+    try:
+        if args.no_config:
+            cfg = config.DEFAULT
+        elif args.config:
+            cfg = config.load(args.config)
+        else:
+            found = config.find()
+            cfg = config.load(found) if found else config.DEFAULT
+            if found and not args.quiet:
+                print(f"using {found}")
+    except config.ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
+
     result = drill.run(
         args.dump,
+        cfg=cfg,
         flavour=args.image_flavour,
         rto_budget=_duration(args.rto) if args.rto else None,
         fail_on=args.fail_on,
