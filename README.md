@@ -77,6 +77,7 @@ inside the target container, which is also what makes the version matching real.
 firedrill run path/to/dump.dump            # restore and report
 firedrill run dump.dump --json report.json # machine-readable
 firedrill run dump.dump --rto 45m          # exceeding the budget is a finding
+firedrill run dump.dump --tier fast        # schema only, for every commit
 firedrill clean                            # remove containers left by a crash
 ```
 

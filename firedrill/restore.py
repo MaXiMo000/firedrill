@@ -187,8 +187,15 @@ def parse_stderr(stderr: str, exit_code: int) -> tuple[list[Finding], int]:
     return findings, errors_ignored
 
 
-def run_restore(container, jobs: int = 1) -> RestoreResult:
-    """Restore the mounted archive inside the container, and time it."""
+def run_restore(container, jobs: int = 1, tier: str = "full") -> RestoreResult:
+    """Restore the mounted archive inside the container, and time it.
+
+    `tier` is "full" or "fast". A fast run passes --schema-only, which
+    restores every object and no rows. That makes the row-reading rungs
+    meaningless rather than passing, which drill.py handles by marking them
+    NOT RUN -- see PLAN.md §3.5: a pass from a schema-only run must never look
+    like a pass from a full one.
+    """
     from .docker import DUMP_PATH
 
     created = container.exec(["createdb", "-U", "postgres", TARGET_DB], timeout=120)
@@ -206,6 +213,8 @@ def run_restore(container, jobs: int = 1) -> RestoreResult:
         )
 
     argv = ["pg_restore", "-U", "postgres", "-d", TARGET_DB, "--no-password"]
+    if tier == "fast":
+        argv.append("--schema-only")
     if jobs > 1:
         argv += ["-j", str(jobs)]
     argv.append(DUMP_PATH)

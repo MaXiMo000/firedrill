@@ -47,7 +47,7 @@ _NO_TOLERANCE_YET = (
 # The only tier implemented. fast/sample are PLAN.md §9 Phase 2; accepting
 # either now would run a full restore and report the tier the user asked for,
 # which is a lie about what was verified.
-IMPLEMENTED_TIERS = ("full",)
+IMPLEMENTED_TIERS = ("full", "fast")
 ALL_TIERS = ("fast", "sample", "full")
 
 _EXPECT = re.compile(r"^\s*(==|!=|>=|<=|>|<)\s*(-?\d+)\s*$")

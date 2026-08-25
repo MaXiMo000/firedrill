@@ -8,6 +8,7 @@ the only target it can build is one it created itself.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import sys
 
 from . import __version__, config, docker, drill, report as reporting
@@ -51,6 +52,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="write the restored catalog here as a structure "
                           "reference, instead of comparing against one. Commit "
                           "the result and review it like any other file.")
+    run.add_argument("--tier", choices=config.ALL_TIERS,
+                     help="how much to restore. `fast` is schema-only: the "
+                          "row-reading checks then report NOT RUN, never a pass.")
     run.add_argument("--quiet", action="store_true", help="suppress the table")
 
     sub.add_parser("clean", help="remove containers left behind by a crash")
@@ -83,6 +87,12 @@ def main(argv: list[str] | None = None) -> int:
             cfg = config.load(found) if found else config.DEFAULT
             if found and not args.quiet:
                 print(f"using {found}")
+        if args.tier:
+            cfg = dataclasses.replace(cfg, tier=args.tier)
+            if args.tier not in config.IMPLEMENTED_TIERS:
+                raise config.ConfigError(
+                    f"tier {args.tier!r} is not implemented yet; "
+                    f"available: {', '.join(config.IMPLEMENTED_TIERS)}")
     except config.ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2

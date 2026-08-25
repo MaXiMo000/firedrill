@@ -47,6 +47,7 @@ class Report:
     total_seconds: float = 0.0
     rto_budget: float | None = None
     fail_on: str = DEFAULT_FAIL_ON
+    tier: str = "full"
     suppressed: list = dataclasses.field(default_factory=list)
 
     @property
@@ -67,6 +68,7 @@ class Report:
     def as_dict(self) -> dict:
         return {
             "dump": self.dump,
+            "tier": self.tier,
             "verified": self.verified,
             "ok": self.ok,
             "worst_severity": worst(self.findings),
@@ -141,7 +143,7 @@ def _run(dump_path: str | pathlib.Path, *, flavour: str = "",
         rto_budget = cfg.rto_budget
     stages = [Stage(name) for name in STAGES]
     report = Report(dump=str(dump_path), stages=stages, findings=[], archive={},
-                    rto_budget=rto_budget, fail_on=fail_on)
+                    rto_budget=rto_budget, fail_on=fail_on, tier=cfg.tier)
     began = time.monotonic()
 
     def stage(name: str) -> Stage:
@@ -274,7 +276,7 @@ def _run(dump_path: str | pathlib.Path, *, flavour: str = "",
         stage("target").detail = container.image
 
         # -- restore -------------------------------------------------------
-        result = restore_stage.run_restore(container)
+        result = restore_stage.run_restore(container, tier=cfg.tier)
         report.findings.extend(result.findings)
         stage("restore").seconds = result.seconds
         stage("restore").status = OK if result.exit_code == 0 else FAILED
@@ -332,7 +334,14 @@ def _run(dump_path: str | pathlib.Path, *, flavour: str = "",
         # Only the rungs the config actually asked for run. The ones it did
         # not ask for say "not configured", which is the honest thing for a
         # report to say and is not the same as a tick.
-        if cfg.volume_tables:
+        if cfg.tier == "fast":
+            # PLAN.md §3.5. A schema-only restore contains no rows, so every
+            # table would count zero and every minimum would "fail" -- or, with
+            # no rules configured, the rung would show a tick for a question it
+            # never asked. Neither is honest, so it did not run.
+            stage("volume").status = NOT_RUN
+            stage("volume").detail = "fast tier restored no rows"
+        elif cfg.volume_tables:
             started = time.monotonic()
             found, info = ladder.volume(container, cfg, restore_stage.TARGET_DB)
             report.findings.extend(found)
@@ -344,7 +353,10 @@ def _run(dump_path: str | pathlib.Path, *, flavour: str = "",
             stage("volume").detail = "no volume rules in the config"
 
         # -- semantics -----------------------------------------------------
-        if cfg.semantics:
+        if cfg.tier == "fast":
+            stage("semantics").status = NOT_RUN
+            stage("semantics").detail = "fast tier restored no rows"
+        elif cfg.semantics:
             started = time.monotonic()
             found, info = ladder.semantics(container, cfg, restore_stage.TARGET_DB)
             report.findings.extend(found)
@@ -359,11 +371,16 @@ def _run(dump_path: str | pathlib.Path, *, flavour: str = "",
         # This one needs no configuration: the questions it asks are the same
         # for every database, so it always runs.
         started = time.monotonic()
-        found, info = ladder.integrity(container, cfg, restore_stage.TARGET_DB)
+        found, info = ladder.integrity(container, cfg, restore_stage.TARGET_DB,
+                                       sequences=cfg.tier != "fast")
         report.findings.extend(found)
         stage("integrity").seconds = time.monotonic() - started
         stage("integrity").status = FAILED if found else OK
-        stage("integrity").detail = f"{info.get('sequences', 0)} sequence(s)"
+        stage("integrity").detail = (
+            f"{info.get('sequences', 0)} sequence(s)" if cfg.tier != "fast"
+            # Collation is a catalog fact and survives a schema-only restore;
+            # a sequence's position does not, because setval lives in the data.
+            else "collation only -- sequences need rows")
     finally:
         # PLAN.md §7: teardown in a finally, always.
         container.teardown()

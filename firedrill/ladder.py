@@ -388,7 +388,8 @@ where c.relkind = 'S' and n.nspname not in ('pg_catalog', 'information_schema')
 """
 
 
-def integrity(container, cfg, database: str) -> tuple[list[Finding], dict]:
+def integrity(container, cfg, database: str,
+              sequences: bool = True) -> tuple[list[Finding], dict]:
     """The checks only a restore can make.
 
     Currently: every sequence is at or ahead of the maximum value in the
@@ -406,6 +407,12 @@ def integrity(container, cfg, database: str) -> tuple[list[Finding], dict]:
     """
     findings: list[Finding] = []
     checked = 0
+
+    if not sequences:
+        # A schema-only restore has no rows, so max(id) is 0 everywhere and
+        # every sequence would look fine. Not asked is not the same as passed.
+        collation_findings, collation_info = collation(container, cfg, database)
+        return collation_findings, {"sequences": 0, **collation_info}
 
     listing = container.sql(_SEQUENCES.strip(), database=database)
     if listing.returncode != 0:

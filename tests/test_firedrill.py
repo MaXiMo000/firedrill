@@ -550,8 +550,10 @@ semantics:
 
 def test_config_unimplemented_tier_is_refused_not_silently_upgraded():
     """A report saying 'fast' when a full restore ran is a lie about what was
-    verified, and so is the reverse."""
-    _rejects("fast", "version: 1\ntier: fast\n", "not implemented yet")
+    verified, and so is the reverse. `sample` is still unbuilt, so it is still
+    refused by name rather than quietly promoted to something that does run."""
+    check("fast is implemented and loads", config.loads(
+        "version: 1\ntier: fast\n").tier, "fast")
     _rejects("sample", "version: 1\ntier: sample\n", "not implemented yet")
     _rejects("nonsense", "version: 1\ntier: turbo\n", "must be one of")
 
@@ -1066,6 +1068,67 @@ def test_version_compare_handles_pre_10_majors():
     check("unparseable does not guess", drill._is_older("nonsense", "18"), False)
 
 
+def test_integration_fast_tier_never_looks_like_a_full_pass():
+    """PLAN.md §3.5, stated as an experiment on one backup.
+
+    stale_replica fails semantics on a full run. On a fast run the rows were
+    never restored, so the honest outcome is NOT RUN -- not a failure, and
+    emphatically not a tick. The whole point is that a reader can tell the two
+    greens apart.
+    """
+    needs_docker()
+    full = drill.run(corpus("stale_replica.dump"),
+                     cfg=config.loads(LADDER_CONFIG))
+    check("a full run catches it", [f.rule for f in full.findings],
+          ["SEMANTICS_FAILED"])
+
+    fast = drill.run(corpus("stale_replica.dump"),
+                     cfg=config.loads("tier: fast\n" + LADDER_CONFIG))
+    check("volume did not run", fast.stage("volume").status, drill.NOT_RUN)
+    check("semantics did not run", fast.stage("semantics").status, drill.NOT_RUN)
+    check("and neither is recorded as ok",
+          drill.OK in (fast.stage("volume").status, fast.stage("semantics").status),
+          False)
+
+    text = reporting.human(fast)
+    check("the tier is stated in capitals, unmissably", "tier: FAST" in text, True)
+    check("the verdict does not claim the data was checked",
+          "PASS (fast tier)" in text, True)
+    check("and says so in as many words", "was not checked" in text, True)
+    check("the json carries it too", json.loads(reporting.as_json(fast))["tier"],
+          "fast")
+
+
+def test_integration_fast_tier_still_restores_the_schema():
+    """It is a cheaper check, not a fake one: the objects must really come
+    back, and the catalog rungs that do not need rows must really run."""
+    needs_docker()
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        ref = _reference_for("healthy_pg16.dump", tmp)
+        cfg = config.loads(
+            f"version: 1\ntier: fast\nstructure:\n  reference: {ref}\n")
+        report = drill.run(corpus("healthy_pg16.dump"), cfg=cfg)
+        check("structure ran on a schema-only restore",
+              report.stage("structure").status, drill.OK)
+        check("collation still ran", report.stage("integrity").status, drill.OK)
+        check("and said sequences were not part of it",
+              "sequences need rows" in report.stage("integrity").detail, True)
+        check("no findings", [f.rule for f in report.findings], [])
+
+
+def test_integration_fast_tier_misses_what_it_says_it_misses():
+    """The inverse, so the previous test cannot pass by accident: a fast run
+    of a backup whose ROWS are wrong must find nothing, because it never
+    looked. If this ever fails, fast is secretly restoring data."""
+    needs_docker()
+    report = drill.run(corpus("volume_drop.dump"),
+                       cfg=config.loads("tier: fast\n" + LADDER_CONFIG))
+    check("nothing found", [f.rule for f in report.findings], [])
+    check("because the rung did not run",
+          report.stage("volume").status, drill.NOT_RUN)
+
+
 def test_integration_leaves_no_containers_behind():
     needs_docker()
     before = set(docker.orphans())
@@ -1147,7 +1210,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 89
+    FLOOR = 92
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "

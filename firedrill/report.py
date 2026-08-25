@@ -39,6 +39,7 @@ def human(report: Report, colour: bool = False) -> str:
             f"  source    PostgreSQL {a.get('server_version')}  "
             f"-> restored into postgres:{a.get('restored_into_major')}"
         )
+    lines.append(f"  {_tier_note(report)}")
     lines.append("")
 
     for stage in report.stages:
@@ -72,11 +73,28 @@ def human(report: Report, colour: bool = False) -> str:
     return "\n".join(lines)
 
 
+def _tier_note(report: Report) -> str:
+    """PLAN.md §3.5: say which tier ran, every time.
+
+    A schema-only pass and a full pass are different claims about a backup,
+    and a reader who cannot tell them apart has been misled by a green tick.
+    """
+    if report.tier == "fast":
+        return ("tier: FAST -- schema only, no rows were restored. Row counts "
+                "and smoke queries did NOT run.")
+    return "tier: full"
+
+
 def _verdict(report: Report) -> str:
     if not report.verified:
         # The distinction the whole tool is built on.
         return ("COULD NOT VERIFY -- the restore did not run, so this backup has "
                 "not been proved to work.")
+    if report.ok and report.tier == "fast":
+        # Not the same claim as a full pass, so not the same sentence. This
+        # run proved the schema comes back and nothing more.
+        return ("PASS (fast tier) -- the schema restored. Whether the DATA is "
+                "there was not checked.")
     if report.ok:
         return "PASS -- restored and answered queries."
     return "FAIL -- the restore ran and produced findings above."
