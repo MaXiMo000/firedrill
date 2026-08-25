@@ -59,7 +59,7 @@ not a feature, they are the price of admission.
 
 ## Status
 
-**Phases 0–3 are built and green.** `main`, 113 tests / 337
+**Phases 0–4 are built and green.** `main`, 122 tests / 371
 checks / 0 skipped. Repo: <https://github.com/MaXiMo000/firedrill> (public).
 CI runs on every push: Linux/Windows × Python 3.10/3.13, plus image, package
 and dogfood jobs.
@@ -72,13 +72,15 @@ firedrill/
   config.py    firedrill.yml -> typed settings, refuses ambiguity   [phase 1]
   sources.py   local / https / s3, read-only by construction        [phase 2]
   history.py   last-known-good: durations, row counts, versions      [phase 3]
+  pitr.py      recover a base backup to a timestamp, then assert       [phase 4]
   ladder.py    structure / volume / semantics / integrity           [phase 1]
   drill.py     inspect -> target -> restore -> smoke -> ladder, each timed
   report.py    human table + --json
   cli.py       run / clean
 tests/
   make_corpus.py      builds the broken-backup fixtures from real containers
-  test_firedrill.py   113 tests; --require-integration makes a skip a failure
+  test_firedrill.py   122 tests; --require-integration makes a skip a failure
+  field_test.py       restores pagila/chinook/northwind -- databases we did not write
   headers/            512-byte committed headers so the parser is testable
                       on a runner that cannot run Linux containers
 ```
@@ -153,30 +155,26 @@ a guard, not as a dependency on that measurement holding.
 **Phase 1 is complete.** Every PLAN.md §8 fixture is built and every check is
 asserted in both directions against a real broken backup. What is left:
 
-**Phases 0–3 are done. PLAN.md §9 Phase 4 is next** — point-in-time
-recovery: a base backup plus WAL, restored to a target timestamp, asserting a
-row written before it exists and one written after it does not. The check
-nobody does, and the one that actually proves PITR works.
+**Phases 0–4 are done, plus the showcase and a field test. PLAN.md §9 Phase 5
+is next** (MySQL/Mongo adapters — *only* if someone asks; Postgres depth beats
+breadth), and **Phase 6, the writeup**.
 
-Phase 3 shipped `history.json` (which unblocked `volume.tolerance`), JUnit
-output, `action.yml`, and copy-paste workflows in `examples/`. The action is
-exercised by CI against this checkout in three directions — healthy, broken,
-and unverifiable — so it is not another control nobody has run.
+Phase 4 is PITR: `firedrill pitr --base DIR --wal DIR --target 'TS'`. The
+boundary assertion is expressed as ordinary `semantics:` checks — the row
+written before the target must exist, the one after must not — because either
+half alone is satisfiable by a restore that is simply wrong.
 
-**One thing genuinely unproven:** `firedrill` is not on PyPI yet, so the
-action's *default* install path (`pip install firedrill[s3]`) has never
-executed. CI covers it via `install-from: .`. Publishing is the last step
-before anyone else can use `MaXiMo000/firedrill@v0`, and `release.yml` has
-still never run.
+`tests/field_test.py` restores pagila, chinook and northwind: real databases
+this project did not write. Run it after touching any check.
 
-Deferred, each with its refusal already written so none can be mistaken for
-working:
+**Still unproven:** `firedrill` is not on PyPI, so the action's default install
+path has never executed and `release.yml` has never run. `PUBLISHING.md` has
+the steps in the order that avoids dead ends.
+
+Deferred, each with its refusal already written:
 
 - `target.type: dsn` — until §7's four interlocks exist.
-- `source.type: gcs` — refused, pointing at `type: https` with a signed URL,
-  which works today and is verified. GCS's S3-compatible XML API may also
-  work through `type: s3` with `endpoint_url`, but that is **untested**, so it
-  is not claimed anywhere.
+- `source.type: gcs` — refused, pointing at `type: https` with a signed URL.
 
 ### Measurements worth not rediscovering
 
@@ -193,6 +191,22 @@ working:
   code — the same lesson as `docker info` exiting 0 with no server version.
 - YAML reads a bare all-digit `sha256:` as a *number* and drops leading
   zeros, so the value that arrives is not the value written. Quote it.
+- **`pg_get_serial_sequence` resolves nothing for a sequence wired only by a
+  column DEFAULT.** pagila does exactly that for all 13 of its sequences. Any
+  check that finds sequences through `pg_depend` ownership alone will examine
+  none of them and report zero, which reads as fine.
+- **`recovery_target_time` is "reached" only if a commit with a LATER
+  timestamp exists in the WAL.** A target after the final commit is reported
+  *unreached*, not satisfied at end-of-WAL.
+- **`pg_walfile_name(pg_switch_wal())` names the segment that is now current**,
+  not the one just completed. Take the name before switching.
+- **A failing `restore_command` is mute.** Postgres treats it as "segment
+  unavailable", so an unreadable WAL archive produces no error line — only an
+  absence of `restored log file` lines and a target that cannot be reached.
+- **Bind-mount uid mismatches break only on Linux.** Docker Desktop makes bind
+  mounts world-writable; a clean Linux host does not. This broke four separate
+  things here, each invisible locally. Copy into the container and `chown`
+  rather than relying on the host's permissions.
 
 ### Two things that turned out easier than this file previously claimed
 
