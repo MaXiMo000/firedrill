@@ -973,6 +973,36 @@ def test_integration_unverifiable_collation_needs_no_reference():
           "COLLATION_MISMATCH" in rules, False)
 
 
+def test_integration_missing_extension_is_caught():
+    """PLAN.md §3.3's other half, and the last §8 fixture.
+
+    The Phase 0 classifier carried an EXTENSION_ABSENT pattern that no fixture
+    had ever exercised. This is the first time it has been shown to fire
+    against a real pg_restore, on a target image whose hstore control file has
+    been removed -- which is what a real recovery host without the binaries
+    actually looks like.
+    """
+    needs_docker()
+    import make_corpus
+    report = drill.run(corpus("missing_extension.dump"),
+                       flavour=make_corpus.NOEXT_FLAVOUR)
+    rules = {f.rule for f in report.findings}
+    check("caught", "EXTENSION_ABSENT" in rules, True)
+    check("non-zero exit", report.exit_code, 1)
+    check("and the dependent objects are reported too, not swallowed",
+          "EMPTY_RESTORE" in rules, True)
+
+
+def test_integration_extension_present_is_silent():
+    """The same dump against a target that does have hstore. If this ever
+    reports EXTENSION_ABSENT the check is worthless, because the finding would
+    no longer mean the extension is missing."""
+    needs_docker()
+    report = drill.run(corpus("missing_extension.dump"))
+    check("nothing", [f.rule for f in report.findings], [])
+    check("exit 0", report.exit_code, 0)
+
+
 def test_integration_leaves_no_containers_behind():
     needs_docker()
     before = set(docker.orphans())
@@ -1054,7 +1084,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 82
+    FLOOR = 84
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "

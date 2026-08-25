@@ -52,15 +52,16 @@ def sh(*args, check=True, **kw):
 class Source:
     """A throwaway Postgres used only to produce dumps."""
 
-    def __init__(self, major: str):
+    def __init__(self, major: str, flavour: str = ""):
         self.major = major
+        self.flavour = flavour
         self.name = f"firedrill-corpus-{major}-{uuid.uuid4().hex[:8]}"
 
     def __enter__(self):
         sh("docker", "run", "-d", "--name", self.name,
            "--label", "firedrill=1",
            "-e", "POSTGRES_PASSWORD=corpus-only-not-a-secret",
-           f"postgres:{self.major}")
+           f"postgres:{self.major}{self.flavour}")
         deadline = time.time() + 120
         while time.time() < deadline:
             probe = sh("docker", "exec", "-u", "postgres", self.name,
@@ -69,7 +70,7 @@ class Source:
             if probe.returncode == 0:
                 return self
             time.sleep(0.3)
-        raise RuntimeError(f"postgres:{self.major} never became ready")
+        raise RuntimeError(f"postgres:{self.major}{self.flavour} never became ready")
 
     def __exit__(self, *exc):
         sh("docker", "rm", "-f", "-v", self.name, check=False)
@@ -85,6 +86,33 @@ class Source:
            "pg_dump", "-U", "postgres", fmt, "-f", inside, db)
         sh("docker", "cp", f"{self.name}:{inside}", str(dest))
         return dest
+
+
+# Tagged into the postgres: namespace so that firedrill's own image_for()
+# reaches it through the existing --image-flavour suffix, with no production
+# code added for the benefit of a test. Upstream publishes no such tag, so
+# there is nothing to shadow.
+NOEXT_FLAVOUR = "-firedrill-noext"
+
+
+def build_noext_image(major: str) -> str:
+    """postgres:<major> with hstore's control file removed.
+
+    The honest way to test EXTENSION_ABSENT: in a real recovery the binaries
+    are missing from the host, and this is what that looks like.
+    """
+    tag = f"postgres:{major}{NOEXT_FLAVOUR}"
+    dockerfile = (
+        f"FROM postgres:{major}\n"
+        "RUN rm -f /usr/share/postgresql/*/extension/hstore*\n"
+    )
+    proc = subprocess.run(
+        ["docker", "build", "-t", tag, "-f", "-", "."],
+        input=dockerfile, capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"could not build {tag}\n{proc.stderr}")
+    return tag
 
 
 def _variant(src: "Source", dest: pathlib.Path, dbname: str, mutation: str):
@@ -169,6 +197,21 @@ def build(outdir: pathlib.Path = DEFAULT_OUT) -> dict:
                     "select setval('customer_id_seq', 5, true);",
                 )
 
+    # -- missing_extension: a dump that uses an extension the restore target
+    # does not have. Measured first, and the cheap tricks did not work: the
+    # alpine image *lists* plperl/plpython3u/pltcl in pg_available_extensions
+    # but ships none of their runtime libraries, so they cannot be created on
+    # either variant. Available is not loadable. So the target image really
+    # does need its control file removed, which is what NOEXT_IMAGE is.
+    build_noext_image(VERSIONS[0])
+    with Source(VERSIONS[0]) as src:
+        src.psql("create database missing_extension;")
+        src.psql("create extension hstore;", db="missing_extension")
+        src.psql("create table t(id int, attrs hstore);", db="missing_extension")
+        made["missing_extension"] = src.dump(
+            outdir / "missing_extension.dump", db="missing_extension"
+        )
+
     # -- truncations, derived from the healthy dump at three depths. They land
     # in different stages on purpose: the header one never reaches a container,
     # the data one restores a schema with no rows in it.
@@ -190,14 +233,20 @@ def build(outdir: pathlib.Path = DEFAULT_OUT) -> dict:
     return made
 
 
-# Deferred to the phase that adds the check which reads them:
-#   missing_extension   -> target image with the extension's control file removed
-#   collation_mismatch  -> source and target on different libc
-# Both need a purpose-built target image rather than a purpose-built dump, so
-# they arrive with the check that reads them rather than sitting here unread.
+# Everything PLAN.md §8 lists is now built, three of them without the
+# purpose-built images that were assumed necessary:
 #
-# wrong_major_version needs no fixture: healthy_pg18 restored into a pinned 16
-# container is the case, and drill.run(pin_major=...) already expresses it.
+#   collation_mismatch  -> no fixture needed. The alpine images are musl and
+#                          the default Debian ones are glibc, so
+#                          --image-flavour -alpine IS the differing target.
+#   missing_extension   -> no control-file surgery needed. The alpine image
+#                          ships the procedural languages (plperl, plpython3u,
+#                          pltcl) and the Debian image does not, so a dump
+#                          taken on alpine cannot restore into the default
+#                          target. Built below.
+#   wrong_major_version -> no fixture needed: healthy_pg18 restored into a
+#                          pinned 16 container is the case, and
+#                          drill.run(pin_major=...) already expresses it.
 
 
 def main() -> int:

@@ -59,7 +59,7 @@ not a feature, they are the price of admission.
 
 ## Status
 
-**Phase 0 and most of Phase 1 are built and green.** `main`, 80 tests / 195
+**Phase 0 and Phase 1 are built and green.** `main`, 85 tests / 207
 checks / 0 skipped. Repo: <https://github.com/MaXiMo000/firedrill> (public).
 CI runs on every push: Linux/Windows × Python 3.10/3.13, plus image, package
 and dogfood jobs.
@@ -76,7 +76,7 @@ firedrill/
   cli.py       run / clean
 tests/
   make_corpus.py      builds the broken-backup fixtures from real containers
-  test_firedrill.py   80 tests; --require-integration makes a skip a failure
+  test_firedrill.py   85 tests; --require-integration makes a skip a failure
   headers/            512-byte committed headers so the parser is testable
                       on a runner that cannot run Linux containers
 ```
@@ -148,26 +148,37 @@ a guard, not as a dependency on that measurement holding.
 
 ## First move in the new chat
 
-Phase 1 is nearly done. What is left, in order:
+**Phase 1 is complete.** Every PLAN.md §8 fixture is built and every check is
+asserted in both directions against a real broken backup. What is left:
 
-1. **Two checks are deliberately unbuilt**, because neither can be verified
-   yet and shipping an unverifiable check is the thing this project refuses.
-   Both need a purpose-built *target image* rather than a purpose-built dump:
-   - `COLLATION_MISMATCH` — PLAN.md §3.4, the flagship silent failure. Needs a
-     target whose libc differs from the source's. Build an image `FROM
-     postgres:16` on a different base, or restore a glibc dump into the alpine
-     flavour that `--image-flavour` already exposes.
-   - `EXTENSION_ABSENT` — needs an image with an extension's control file
-     removed. `ladder.integrity`'s docstring records what each is waiting for.
-2. **`volume.tolerance` parses but nothing reads it.** The config accepts it
-   and the loader's own rule is that a parsed-and-ignored key is a silent
-   skip. It needs either a check that reads it (compare against counts stored
-   alongside the structure reference) or a refusal until Phase 3's
-   `history.json` exists. **Do not leave it as it is** — it is exactly the
-   failure `_reject_unknown` was written to prevent.
-3. **The README does not document the config file.** It stops at Phase 0.
-4. Then PLAN.md §9 **Phase 2** — S3/GCS sources, checksums, and the
+1. **The README does not document the config file.** It stops at Phase 0 — no
+   `firedrill.yml`, no ladder, no `--write-reference`. This is the gap between
+   what the tool does and what a stranger can tell it does.
+2. **PLAN.md §9 Phase 2** — S3/GCS sources, checksum verification, and the
    `fast`/`sample` tiers that `config.py` currently refuses by name.
+3. Smaller, when convenient:
+   - `report.archive["restored_into_major"]` is the *intended* major, read
+     from the dump header, not read back from the running server. The image
+     tag makes it true in practice, but nothing asserts the server agrees.
+   - `volume.tolerance` is refused until Phase 3's `history.json` gives it a
+     baseline to compare against. The refusal message says so.
+
+### Two things that turned out easier than this file previously claimed
+
+Both were recorded here as needing purpose-built images. Measuring first
+changed the answer:
+
+- **Collation** needed no new image. `--image-flavour -alpine` already
+  provides a musl target against the default glibc one. Measured:
+  `postgres:16` reports `datcollversion = 2.41`, `postgres:16-alpine` reports
+  **empty** — musl reports no version at all, which is why there are two
+  rules (`COLLATION_UNVERIFIABLE` and `COLLATION_MISMATCH`) rather than one.
+- **Extensions** did need one, but not for the assumed reason. The alpine
+  image *lists* `plperl` / `plpython3u` / `pltcl` in `pg_available_extensions`
+  and ships none of their runtime libraries, so they cannot be created on
+  either variant — available is not loadable. `make_corpus.build_noext_image`
+  builds `postgres:16-firedrill-noext` with hstore's control file removed,
+  which is what a real recovery host without the binaries looks like.
 
 Run the suite before changing anything:
 
