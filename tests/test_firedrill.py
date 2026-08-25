@@ -1019,6 +1019,53 @@ def test_integration_extension_present_is_silent():
     check("exit 0", report.exit_code, 0)
 
 
+def test_integration_restored_into_major_is_measured_not_assumed():
+    """The report used to echo the major it *intended* to start. The image tag
+    makes that true in practice, but 'the version we asked for' and 'the
+    version that restored the dump' are different claims, and a report should
+    only make the one it measured."""
+    needs_docker()
+    report = drill.run(corpus("healthy_pg18.dump"))
+    check("asked for 18", report.archive["target_major_requested"], "18")
+    check("and the server said 18", report.archive["restored_into_major"], "18")
+
+
+def test_integration_pinning_an_older_major_is_caught_before_the_restore():
+    """PLAN.md §8's wrong_major_version. It always failed; it just failed as a
+    generic 'could not execute query' several stages later, which does not
+    tell you that the pin was the problem."""
+    needs_docker()
+    report = drill.run(corpus("healthy_pg18.dump"), pin_major="16")
+    findings = {f.rule: f for f in report.findings}
+    check("named", "VERSION_MISMATCH" in findings, True)
+    check("high -- a newer dump cannot restore into an older major",
+          findings["VERSION_MISMATCH"].severity, "high")
+    check("caught at inspect, before a container was started",
+          findings["VERSION_MISMATCH"].stage, "inspect")
+    check("and the restore does indeed fail", report.exit_code, 1)
+
+
+def test_integration_pinning_a_newer_major_is_noted_but_not_fatal():
+    """Restoring forward usually works, so this is medium and the restore
+    still succeeds -- but it is not the version a real recovery would use, so
+    it is not silent either."""
+    needs_docker()
+    report = drill.run(corpus("healthy_pg16.dump"), pin_major="18")
+    check("rule", [f.rule for f in report.findings], ["VERSION_MISMATCH"])
+    check("medium", report.findings[0].severity, "medium")
+    check("the restore itself was fine", report.stage("restore").status, drill.OK)
+
+
+def test_version_compare_handles_pre_10_majors():
+    """Majors are '16' and '18', but pre-10 releases are '9.6'. Compared
+    component-wise, because int('9.6') raises and a guess here would put a
+    severity on a finding nobody measured."""
+    check("9.6 is older than 10", drill._is_older("9.6", "10"), True)
+    check("16 is older than 18", drill._is_older("16", "18"), True)
+    check("18 is not older than 16", drill._is_older("18", "16"), False)
+    check("unparseable does not guess", drill._is_older("nonsense", "18"), False)
+
+
 def test_integration_leaves_no_containers_behind():
     needs_docker()
     before = set(docker.orphans())
@@ -1100,7 +1147,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 85
+    FLOOR = 89
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "

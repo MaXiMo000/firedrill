@@ -94,6 +94,21 @@ def run(dump_path: str | pathlib.Path, *, cfg=None, **kw) -> Report:
     return _suppress(_run(dump_path, cfg=cfg, **kw), cfg)
 
 
+def _is_older(target: str, source: str) -> bool:
+    """Is `target` an older Postgres major than `source`?
+
+    Majors are '16', '18' -- but pre-10 releases are '9.6', so this compares
+    component-wise rather than as integers. False when either is unparseable:
+    a guess here would put a severity on a finding that has not been measured.
+    """
+    def parts(value):
+        return tuple(int(n) for n in value.split("."))
+    try:
+        return parts(target) < parts(source)
+    except (ValueError, AttributeError):
+        return False
+
+
 def _suppress(report: Report, cfg) -> Report:
     """Move ignored findings aside -- recorded with their reason, not deleted.
 
@@ -173,9 +188,31 @@ def _run(dump_path: str | pathlib.Path, *, flavour: str = "",
         "source_dbname": header.dbname,
         "server_version": header.server_version,
         "server_major": header.server_major,
-        "restored_into_major": major,
+        # What we will ask for. Overwritten below with what the server
+        # actually reports, once there is a server to ask.
+        "target_major_requested": major,
+        "restored_into_major": None,
         "size_bytes": dump_path.stat().st_size,
     }
+    # A pinned major that disagrees with the archive is knowable here, before
+    # a container is started, and it explains a failure that otherwise arrives
+    # as a generic "could not execute query" several stages later.
+    if pin_major and pin_major != header.server_major:
+        older = _is_older(pin_major, header.server_major)
+        report.findings.append(Finding(
+            stage="inspect", rule="VERSION_MISMATCH",
+            severity="high" if older else "medium",
+            message=f"the archive is from PostgreSQL {header.server_major} and "
+                    f"--postgres pinned {pin_major}",
+            fix=("A dump cannot restore into an older major version; this will "
+                 "fail. Drop the pin and let the version be read from the "
+                 "archive." if older else
+                 "Restoring into a newer major usually works, but it is not the "
+                 "version this backup came from, so it is not the version your "
+                 "recovery would use. Drop the pin to match the archive."),
+            evidence="",
+        ))
+
     stage("inspect").status = OK
     stage("inspect").seconds = time.monotonic() - started
     stage("inspect").detail = f"{header.server_version} ({header.format_name})"
@@ -220,6 +257,17 @@ def _run(dump_path: str | pathlib.Path, *, flavour: str = "",
             ))
             report.total_seconds = time.monotonic() - began
             return report
+
+        # Ask the server what it is, rather than reporting what we asked for.
+        # These agree because the image tag decides it -- but "the version we
+        # intended" and "the version that restored the dump" are different
+        # claims, and only one of them is a measurement.
+        served = container.sql("select current_setting('server_version')")
+        try:
+            report.archive["restored_into_major"] = archive.major_of(
+                served.stdout.strip())
+        except archive.ArchiveError:
+            report.archive["restored_into_major"] = None
 
         stage("target").status = OK
         stage("target").seconds = time.monotonic() - started

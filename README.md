@@ -150,6 +150,7 @@ tick. "Nothing asked for this" and "this passed" are different facts.
 | `EMPTY_RESTORE` | restored cleanly and contains no user tables |
 | `TARGET_UNAVAILABLE` | the restore could not be attempted |
 | `RTO_EXCEEDED` | slower than the stated budget |
+| `VERSION_MISMATCH` | `--postgres` pinned a major the archive did not come from |
 | `STRUCTURE_MISSING` | an object in the committed reference did not come back |
 | `STRUCTURE_UNEXPECTED` | the database has drifted from the reference |
 | `VOLUME_BELOW_MINIMUM` | a table restored with fewer rows than the config requires |
