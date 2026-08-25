@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import time
 
 from . import archive, docker
 from .finding import Finding
@@ -160,14 +161,27 @@ def recover(base, wal, target: str, *, flavour: str = "",
     return container, []
 
 
-def confirm_promoted(container) -> list[Finding]:
-    """It is out of recovery, so it stopped where it was told to.
+def confirm_promoted(container, timeout: int = 120) -> list[Finding]:
+    """Wait for the server to leave recovery, then confirm it did.
 
-    Cheap, and worth asserting rather than assuming: a server still in recovery
-    would answer queries as a read-only replica and every downstream check would
-    pass against a database that never finished arriving.
+    `pg_isready` is not the signal here. During archive recovery Postgres
+    accepts read-only connections as soon as it reaches consistency, so the
+    readiness probe succeeds while replay is still running -- measured: this
+    passed locally and failed on a CI runner, where the query landed mid-flight
+    and saw pg_is_in_recovery() still true.
+
+    So this polls rather than snapshots. A server still in recovery when the
+    timeout expires is reported: it would answer every downstream check as a
+    read-only replica of a database that never finished arriving, and they
+    would all pass.
     """
+    deadline = time.monotonic() + timeout
     answer = container.sql("select pg_is_in_recovery()")
+    while (answer.returncode == 0 and answer.stdout.strip() == "t"
+           and time.monotonic() < deadline):
+        time.sleep(0.5)
+        answer = container.sql("select pg_is_in_recovery()")
+
     if answer.returncode != 0:
         return [Finding(
             stage="recover", rule="PITR_FAILED", severity="critical",
