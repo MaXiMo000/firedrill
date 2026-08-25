@@ -60,9 +60,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # The annotated tag's own message is the release body. A generated
+          # commit list is a poor thing to greet someone with on a Marketplace
+          # listing; what the tag was written to say is better, and it forces
+          # the release notes to be written deliberately rather than derived.
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > /tmp/notes.md
+          # Append the generated changelog under it, so nothing is lost.
+          {
+            echo
+            echo "---"
+            echo
+            gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+              -f tag_name="$GITHUB_REF_NAME" --jq .body
+          } >> /tmp/notes.md
+
           gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes \
+            --title "firedrill $GITHUB_REF_NAME" \
+            --notes-file /tmp/notes.md \
             dist/*
       - name: It exists, and points at this tag
         env:

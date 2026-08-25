@@ -1,0 +1,19 @@
+# carabiner runs against this repository in CI (the `dogfood` job).
+#
+# Every suppression here must carry a written reason, which is carabiner's one
+# piece of imposed process and the same rule firedrill applies to its own
+# `ignore:` list. An unexplained suppression is how a scan quietly becomes
+# decorative.
+
+ignore:
+  - check: CI003
+    path: ".github/workflows/ci.yml"
+    reason: >-
+      The `published` job deliberately uses MaXiMo000/firedrill@v0 unpinned,
+      because its entire purpose is to exercise the moving tag a stranger
+      actually consumes. Pinning it to a SHA would test a specific commit
+      instead of the thing users get, which is the one property this job
+      exists to prove. The rule is right in general and CI003's own wording
+      concedes the case: moving the tag requires the owner to do it
+      deliberately, and here the owner is this repository. Every third-party
+      action in this workflow IS pinned by SHA.
