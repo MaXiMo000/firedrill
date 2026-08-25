@@ -317,14 +317,72 @@ GitHub Action, JUnit and JSON output, `history.json` trends, a scheduled
 workflow template, a PR comment that says *"restored in 4m12s, 0 findings"*.
 *Exit:* a stranger can schedule a nightly restore check in ten lines of YAML.
 
-**Phase 4 — PITR**
+**Phase 4 — PITR** *(next)*
 Base backup plus WAL, restore to a timestamp, assert the boundary row. The check
 nobody does.
 *Exit:* proven against a fixture with a known write timeline.
 
+Design worked out, mechanics still to be measured:
+
+*The fixture* — one source container with `wal_level=replica`, `archive_mode=on`
+and an `archive_command` copying into a mounted directory. Then, in order:
+`pg_basebackup -X stream` **first**, so the base precedes the writes; insert row
+`before`; record `T = now()`; sleep past the resolution; insert row `after`;
+`pg_switch_wal()` and `checkpoint` so the segment carrying both writes is
+archived. Ship base + WAL as two directories plus the recorded `T`.
+
+*The restore* — the postgres image only runs `initdb` when `PGDATA` is empty, so
+a base backup seeded into it is started rather than initialised. That means an
+entrypoint wrapper: copy the base in, `chown` it to postgres (the copy lands as
+root, and the entrypoint drops privileges after), `chmod 700` (Postgres refuses a
+group-readable data directory), write `recovery.signal`, and append
+`restore_command`, `recovery_target_time` and `recovery_target_action = promote`
+to `postgresql.conf`.
+
+*The assertion, and the only one that proves anything* — the row written before
+`T` **exists** and the row written after it **does not**. Either half alone is
+satisfiable by a broken restore: restoring everything passes the first, and
+restoring nothing passes the second.
+
+*Known unknowns to measure rather than assume:*
+- Whether recovery reaching its target is distinguishable from recovery
+  *failing* to reach it. `recovery_target_action = promote` ends with a server
+  accepting connections either way, so "the target was reached" needs reading
+  back (`pg_last_wal_replay_lsn`, the log line, or the boundary rows
+  themselves) — otherwise a PITR that silently stopped early reports as a pass.
+- Whether a target timestamp *before* the base backup's own consistency point
+  fails loudly or hangs. It must become a finding, not a timeout.
+- Clock domains. `T` is recorded by the source server; `recovery_target_time` is
+  interpreted by the target's timezone setting. Both should be UTC and it should
+  be asserted, not hoped.
+
 **Phase 5 — reach**
 MySQL and MongoDB adapters *if and only if* the Postgres one is genuinely solid
 and someone asks. Postgres depth beats breadth here.
+
+**Phase 5.5 — the shop window and the field test** *(added mid-project)*
+
+Two things that only make sense once the tool works, and which check each other:
+
+- **A showcase page** (`site/`, deployed by `pages.yml`), in the house visual
+  language shared with the portfolio and carabiner: Archivo and a mono, the
+  `--void`/`--chalk`/`--alloy` palette, and a metaphor drawn from the project's
+  own domain — carabiner stamps a climbing-gear ratings plate, so firedrill
+  issues a fire-equipment **inspection tag**. Every number and rule name on it
+  must be one the tool actually produces; a test asserts the page quotes no rule
+  the code cannot emit, because marketing copy is the text nobody re-reads
+  against the source.
+- **A field test against real backups** — the corpus is synthetic by
+  construction, which is what makes it precise and also what makes it a
+  laboratory. Restore dumps that other people made, with the schemas and
+  extension habits real projects have: the standard sample databases (pagila,
+  dvdrental, chinook, northwind, employees), and any open-source project that
+  publishes a seed or demo dump. Record what breaks, honestly, including the
+  cases where firedrill is wrong rather than the backup.
+
+*Exit:* the page states only measured facts, and the field test has produced at
+least one finding that the synthetic corpus did not — or an explicit statement
+that it did not, which is itself a result worth publishing.
 
 **Phase 6 — the writeup**
 *"I restored 200 open-source projects' backup scripts and N% produced something

@@ -21,6 +21,7 @@ import json
 import time
 import hashlib
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -783,6 +784,43 @@ def test_history_last_good_will_not_cross_tiers():
     check("nothing to compare against yet", history.last_good([], "full"), None)
     check("and trend says nothing rather than guessing",
           history.trend([], 5.0, "full"), "")
+
+
+def test_site_is_self_contained_and_complete():
+    """The showcase page is a deliverable, so it gets assertions too.
+
+    Two properties worth pinning: it ships no JavaScript at all (a static page
+    about verification should not ask anyone to run code to read it), and it
+    still contains each section its navigation promises -- an anchor that
+    scrolls nowhere is the cheapest possible broken link.
+    """
+    site = (HERE.parent / "site" / "index.html").read_text(encoding="utf-8")
+    check("no script tags", "<script" in site.lower(), False)
+    for anchor in ("problem", "ladder", "measured", "use"):
+        check(f"#{anchor} exists", f'id="{anchor}"' in site, True)
+        check(f"#{anchor} is linked", f'href="#{anchor}"' in site, True)
+
+
+def test_site_quotes_only_rules_the_code_can_emit():
+    """The page makes claims about this tool in the tool's own vocabulary. A
+    rule name on the page that no code path emits is a lie in the shop window,
+    and it is exactly the kind that survives because nobody re-reads marketing
+    copy against the source."""
+    site = (HERE.parent / "site" / "index.html").read_text(encoding="utf-8")
+    # Every quoted ALL_CAPS token in the source, not just `rule="..."`:
+    # restore.py's classifier table lists its rules positionally, so matching
+    # only the keyword form reported three real rules as invented. The check
+    # was wrong, not the page.
+    known = set()
+    for module in ("drill", "ladder", "restore", "sources"):
+        source = (HERE.parent / "firedrill" / f"{module}.py").read_text(encoding="utf-8")
+        known.update(re.findall(r'"([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)"', source))
+    check("the code emits rules to compare against", len(known) >= 15, True)
+
+    quoted = set(re.findall(r"\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b", site))
+    invented = sorted(quoted - known)
+    check(f"the page invents no rule names (found: {invented})", invented, [])
+    check("and it does quote several real ones", len(quoted & known) >= 5, True)
 
 
 def test_readme_yaml_examples_actually_load():
@@ -1735,7 +1773,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 113
+    FLOOR = 115
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "

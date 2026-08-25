@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>firedrill — you don't have backups, you have hopes</title>
+<meta name="description" content="A backup you have not restored is not a backup. firedrill restores it into a disposable, version-matched Postgres and proves the result is usable — on a schedule, in CI.">
+<meta property="og:title" content="firedrill">
+<meta property="og:description" content="Every one of these backups restored with exit code 0. Four of them were unusable. That gap is the entire product.">
+<meta property="og:type" content="website">
+<meta name="theme-color" content="#08090C">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..900&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  /* House palette, shared with the portfolio. The accent is this project's
+     own: emergency red, because that is the domain. */
+  --void:#08090C; --chalk:#EDECE8; --alloy:#98A3B1;
+  --ember:#E2412A; --escalate:#E8873B; --beam:#86E9DE;
+  --hair:rgba(255,255,255,.07); --hair-hi:rgba(255,255,255,.14);
+  --panel:#0E1015; --panel-hi:#141821;
+  --stamp:'Archivo',system-ui,sans-serif;
+  --mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,monospace;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0; background:var(--void); color:var(--chalk);
+  font-family:var(--stamp); font-variation-settings:'wdth' 100,'wght' 400;
+  font-size:17px; line-height:1.62; -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1140px;margin:0 auto;padding:0 28px}
+h1,h2,h3{margin:0;font-variation-settings:'wdth' 118,'wght' 800;letter-spacing:-.025em;line-height:1.04}
+a{color:inherit}
+:focus-visible{outline:3px solid var(--ember);outline-offset:3px}
+.mono{font-family:var(--mono)}
+
+/* the vernacular of safety equipment: small stencilled labels */
+.stamp{font-family:var(--mono);font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--alloy)}
+
+/* ---------- masthead ---------- */
+.mast{display:flex;justify-content:space-between;align-items:center;padding:24px 0;border-bottom:1px solid var(--hair)}
+.mark{display:flex;gap:11px;align-items:center;font-variation-settings:'wdth' 118,'wght' 800;font-size:19px}
+.mark i{width:12px;height:12px;background:var(--ember);display:block;
+  clip-path:polygon(50% 0,100% 100%,0 100%)}
+.mast nav{display:flex;gap:24px}
+.mast nav a{text-decoration:none;font-size:14px;color:var(--alloy);border-bottom:1px solid transparent;padding-bottom:2px}
+.mast nav a:hover{color:var(--chalk);border-color:var(--ember)}
+
+/* ---------- hero ---------- */
+.hero{display:grid;grid-template-columns:1.1fr .9fr;gap:56px;align-items:center;padding:82px 0 60px}
+.hero h1{font-size:clamp(40px,6.6vw,82px)}
+.hero h1 em{font-style:normal;color:var(--ember)}
+.lede{font-size:19px;max-width:48ch;margin:26px 0 0;color:#C8CDD4}
+.cta{display:flex;gap:13px;flex-wrap:wrap;margin-top:32px}
+.btn{display:inline-flex;align-items:center;gap:9px;padding:13px 22px;text-decoration:none;
+  font-size:14px;font-variation-settings:'wdth' 100,'wght' 700;letter-spacing:.02em;
+  background:var(--ember);color:#fff;border:1px solid var(--ember);transition:transform .15s,filter .15s}
+.btn:hover{transform:translateY(-2px);filter:brightness(1.12)}
+.btn.ghost{background:transparent;color:var(--chalk);border-color:var(--hair-hi)}
+.btn.ghost:hover{background:rgba(255,255,255,.06)}
+
+/* ---------- the inspection tag ---------- */
+/* Fire equipment carries a punched tag saying who checked it and when. That is
+   precisely what this tool issues, so it is what the hero shows. */
+.tag{background:var(--panel);border:1px solid var(--hair-hi);position:relative;
+  padding:22px 24px 20px;box-shadow:0 24px 60px rgba(0,0,0,.5)}
+.tag::before{content:"";position:absolute;left:50%;top:-9px;width:26px;height:11px;
+  transform:translateX(-50%);border:1px solid var(--hair-hi);border-bottom:none;
+  border-radius:13px 13px 0 0;background:var(--void)}
+.tag h3{font-size:13px;font-family:var(--mono);font-variation-settings:normal;
+  letter-spacing:.2em;text-transform:uppercase;color:var(--alloy);font-weight:600}
+.tag .verdict{font-size:30px;margin:12px 0 2px;color:var(--beam);
+  font-variation-settings:'wdth' 118,'wght' 800}
+.tag .verdict.bad{color:var(--ember)}
+.tagrows{margin-top:16px;border-top:1px solid var(--hair);font-family:var(--mono);font-size:13px}
+.tagrow{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid var(--hair)}
+.tagrow span:first-child{color:var(--alloy)}
+.tagrow b{font-weight:600}
+.ok{color:var(--beam)} .no{color:var(--ember)} .na{color:var(--alloy)}
+
+/* ---------- generic section ---------- */
+section{padding:72px 0;border-top:1px solid var(--hair)}
+.head{max-width:64ch;margin-bottom:34px}
+.head h2{font-size:clamp(26px,3.4vw,40px)}
+.head p{color:var(--alloy);margin:14px 0 0;font-size:17px}
+
+/* ---------- tables ---------- */
+table{width:100%;border-collapse:collapse;font-size:15px}
+th,td{text-align:left;padding:13px 14px;border-bottom:1px solid var(--hair);vertical-align:top}
+th{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--alloy);font-weight:600}
+td code,.mono-cell{font-family:var(--mono);font-size:13px}
+tbody tr:hover{background:rgba(255,255,255,.025)}
+
+/* ---------- the ladder ---------- */
+.rungs{display:grid;gap:0;counter-reset:rung}
+.rung{display:grid;grid-template-columns:64px 1fr;gap:20px;padding:18px 0;border-bottom:1px solid var(--hair);align-items:start}
+.rung:hover .n{background:var(--ember);color:#fff;border-color:var(--ember)}
+.n{counter-increment:rung;font-family:var(--mono);font-size:13px;font-weight:600;
+  width:38px;height:38px;display:grid;place-items:center;border:1px solid var(--hair-hi);
+  color:var(--alloy);transition:.15s}
+.n::before{content:counter(rung,decimal-leading-zero)}
+.rung h4{margin:0 0 4px;font-size:17px;font-variation-settings:'wdth' 112,'wght' 700}
+.rung p{margin:0;color:var(--alloy);font-size:15px}
+
+/* ---------- measurement cards ---------- */
+.finds{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:18px}
+.find{background:var(--panel);border:1px solid var(--hair);padding:22px}
+.find .stamp{color:var(--escalate)}
+.find h4{margin:10px 0 8px;font-size:18px;font-variation-settings:'wdth' 112,'wght' 700}
+.find p{margin:0;color:var(--alloy);font-size:15px}
+.find pre{margin:12px 0 0;background:var(--void);border:1px solid var(--hair);
+  padding:11px 12px;overflow-x:auto;font-family:var(--mono);font-size:12.5px;color:#C8CDD4}
+
+/* ---------- code ---------- */
+pre.block{background:var(--panel);border:1px solid var(--hair);padding:20px;overflow-x:auto;
+  font-family:var(--mono);font-size:13.5px;line-height:1.7;margin:0}
+pre.block .c{color:var(--alloy)}
+pre.block .g{color:var(--beam)}
+pre.block .r{color:var(--ember)}
+pre.block .y{color:var(--escalate)}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+
+/* ---------- never ---------- */
+.never{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+.never div{border:1px solid var(--hair);padding:16px 18px;font-size:15px;color:var(--alloy)}
+.never b{color:var(--chalk);font-variation-settings:'wdth' 112,'wght' 700;display:block;margin-bottom:3px}
+
+footer{padding:52px 0 70px;border-top:1px solid var(--hair);color:var(--alloy);font-size:14px}
+footer a{color:var(--chalk)}
+
+@media (max-width:860px){
+  .hero{grid-template-columns:1fr;gap:40px;padding:54px 0 44px}
+  .two{grid-template-columns:1fr}
+  .mast nav{display:none}
+}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header class="mast">
+    <div class="mark"><i></i> firedrill</div>
+    <nav>
+      <a href="#problem">The problem</a>
+      <a href="#ladder">The ladder</a>
+      <a href="#measured">What it found</a>
+      <a href="#use">Use it</a>
+      <a href="https://github.com/MaXiMo000/firedrill">GitHub</a>
+    </nav>
+  </header>
+
+  <div class="hero">
+    <div>
+      <div class="stamp">Postgres restore verification</div>
+      <h1>You don't have backups.<br>You have <em>hopes</em>.</h1>
+      <p class="lede">
+        firedrill takes a Postgres backup and <strong>actually restores it</strong> into a
+        disposable, version-matched container — then proves the result is usable.
+        It fails your build the day a backup stops being restorable, not the day
+        you need it.
+      </p>
+      <div class="cta">
+        <a class="btn" href="https://github.com/MaXiMo000/firedrill">Read the source</a>
+        <a class="btn ghost" href="#use">Ten lines of YAML</a>
+      </div>
+      <p class="stamp" style="margin-top:30px">
+        A verification that could not run never reports as passing
+      </p>
+    </div>
+
+    <div class="tag">
+      <h3>Inspection record</h3>
+      <div class="verdict">PASS</div>
+      <div class="stamp">restored in 2.4s · 0 findings · tier full</div>
+      <div class="tagrows">
+        <div class="tagrow"><span>fetch</span><b class="ok">ok · sha256 verified</b></div>
+        <div class="tagrow"><span>inspect</span><b class="ok">ok · custom v1.15.0</b></div>
+        <div class="tagrow"><span>target</span><b class="ok">ok · postgres:16</b></div>
+        <div class="tagrow"><span>restore</span><b class="ok">ok · exit 0</b></div>
+        <div class="tagrow"><span>structure</span><b class="ok">ok · 8 objects</b></div>
+        <div class="tagrow"><span>volume</span><b class="ok">ok · 2,000 rows</b></div>
+        <div class="tagrow"><span>semantics</span><b class="ok">ok · 1 check</b></div>
+        <div class="tagrow"><span>integrity</span><b class="ok">ok · 1 sequence</b></div>
+      </div>
+      <p class="stamp" style="margin-top:14px;color:var(--alloy)">
+        A rung that could not run reads <span class="na">n/a</span>, never a tick
+      </p>
+    </div>
+  </div>
+</div>
+
+<section id="problem">
+  <div class="wrap">
+    <div class="head">
+      <h2>The failure is never “we had no backup”.</h2>
+      <p>
+        It is always one of these, discovered at the worst possible moment. Every
+        one is invisible to a backup <em>job</em> and obvious to a backup
+        <em>restore</em>. That gap is the entire product.
+      </p>
+    </div>
+    <table>
+      <thead><tr><th>What went wrong</th><th>Why nobody noticed</th></tr></thead>
+      <tbody>
+        <tr><td>pg_dump exited 0 but a full disk truncated the output</td><td class="mono-cell">exit code 0</td></tr>
+        <tr><td>The dump was of a replica that had stopped replicating</td><td class="mono-cell">it ran nightly, without error</td></tr>
+        <tr><td>An extension (postgis, pgvector, citext) is absent on the restore host</td><td class="mono-cell">never restored anywhere else</td></tr>
+        <tr><td>Roles named by <code>OWNER TO</code> do not exist on the target</td><td class="mono-cell">pg_restore warns and continues</td></tr>
+        <tr><td>The glibc/ICU collation differs, so text indexes sort differently</td><td class="mono-cell">wrong rows, no error at all</td></tr>
+        <tr><td>A sequence sits below <code>max(id)</code></td><td class="mono-cell">first insert after failover collides</td></tr>
+        <tr><td>Restore takes 14 hours; the stated RTO is 1 hour</td><td class="mono-cell">never measured</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="ladder">
+  <div class="wrap">
+    <div class="head">
+      <h2>A ladder, and every rung reports for itself.</h2>
+      <p>
+        Each rung is independently reportable, and a rung that <em>cannot</em> run
+        says so rather than passing. That distinction is the whole design: a tool
+        that says OK because it silently skipped the restore is worse than no tool,
+        because it manufactures confidence.
+      </p>
+    </div>
+    <div class="rungs">
+      <div class="rung"><div class="n"></div><div>
+        <h4>Fetch</h4>
+        <p>Local path, presigned URL, or S3. Size and checksum are verified before
+        anything is restored — a dump that arrives truncated but plausible never
+        reaches a container.</p></div></div>
+      <div class="rung"><div class="n"></div><div>
+        <h4>Restore</h4>
+        <p>Into a disposable Postgres of the <em>dump's own major version</em>, read
+        out of the archive header in pure Python. pg_restore's stderr is classified;
+        warnings are findings, not noise.</p></div></div>
+      <div class="rung"><div class="n"></div><div>
+        <h4>Structure</h4>
+        <p>The restored catalog against a committed reference — one line per object,
+        sorted, diffable in review.</p></div></div>
+      <div class="rung"><div class="n"></div><div>
+        <h4>Volume</h4>
+        <p>Row counts against a floor, or against the last known-good restore. A
+        table that lost 90% of its rows restores perfectly.</p></div></div>
+      <div class="rung"><div class="n"></div><div>
+        <h4>Semantics</h4>
+        <p>Your own smoke queries. <em>“There is at least one order from the last 7
+        days”</em> catches a stale-replica dump that every structural check passes.</p></div></div>
+      <div class="rung"><div class="n"></div><div>
+        <h4>Integrity</h4>
+        <p>The checks only a restore can make: sequences ahead of <code>max(id)</code>,
+        and collation — the silent one that returns wrong rows with no error.</p></div></div>
+      <div class="rung"><div class="n"></div><div>
+        <h4>Time</h4>
+        <p>Every stage timed against a stated RTO budget, and measured against the
+        last good run. RTO becomes a trend you have measured, not a number you
+        claimed.</p></div></div>
+    </div>
+  </div>
+</section>
+
+<section id="measured">
+  <div class="wrap">
+    <div class="head">
+      <h2>Things that were measured, not assumed.</h2>
+      <p>
+        Each of these changed the design. They are here because reasoning about
+        Postgres gets you a plausible answer, and a restore tool cannot ship a
+        plausible answer.
+      </p>
+    </div>
+    <div class="finds">
+
+      <div class="find">
+        <div class="stamp">Collation · PG 16</div>
+        <h4>musl reports no collation version at all</h4>
+        <p>Not a <em>different</em> one — none. So an alpine target cannot tell you
+        whether text indexes sort like production's, and neither can Postgres. That
+        is two findings, not one.</p>
+<pre>postgres:16         2.41
+postgres:16-alpine  <span style="color:var(--ember)">(empty)</span></pre>
+      </div>
+
+      <div class="find">
+        <div class="stamp">Catalog · PG 16 vs 18</div>
+        <h4>PG18 makes NOT NULL a catalog row</h4>
+        <p>A schema reference taken on 16 called every not-null column “drift” on 18.
+        The column line already records not-null, so those rows are a duplicate
+        representation — excluded, and one reference is now portable across majors.</p>
+<pre>+ constraint|public.customer.customer_email_not_null|n
++ constraint|public.customer.customer_id_not_null|n</pre>
+      </div>
+
+      <div class="find">
+        <div class="stamp">Sampling · PG 16</div>
+        <h4>A table-scoped data restore leaves setval behind</h4>
+        <p>2,000 rows arrive and the sequence stays at 1. Checking sequences under
+        the sample tier would report a failure about firedrill's own sampling rather
+        than about the backup — the most damaging kind of false positive.</p>
+<pre>rows 2000  ·  sequence <span style="color:var(--ember)">1</span></pre>
+      </div>
+
+      <div class="find">
+        <div class="stamp">Exit codes · the tool itself</div>
+        <h4>docker info exits 0 with no server version</h4>
+        <p>On a CI runner with an unreachable daemon. The availability probe trusted
+        the exit code and called a dead daemon usable — the exact bug this tool
+        exists to complain about, in its own front door.</p>
+<pre>rc=0  ServerVersion=<span style="color:var(--ember)">""</span></pre>
+      </div>
+
+      <div class="find">
+        <div class="stamp">Exit codes · PG 16 &amp; 18</div>
+        <h4>The plan said warnings with exit 0. It was exit 1.</h4>
+        <p>Measured on both majors, custom format, in every broken case. The exit
+        code is still insufficient — one bit never says <em>which</em> failure — so
+        stderr classifies and the code is a backstop.</p>
+<pre>pg_restore: warning: errors ignored on restore: 1
+exit <span style="color:var(--escalate)">1</span></pre>
+      </div>
+
+      <div class="find">
+        <div class="stamp">Toolchain · Windows runners</div>
+        <h4>bash -n exits 1 with empty stderr</h4>
+        <p>Because <code>bash</code> there is the WSL stub. A failure with no message
+        at all is the tell. Probe a tool before trusting its exit code — the same
+        lesson, twice, in one project.</p>
+<pre>bash -n &lt;&lt;&lt; ':'   →   rc=<span style="color:var(--ember)">1</span>, stderr=""</pre>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section id="corpus">
+  <div class="wrap">
+    <div class="head">
+      <h2>Every fixture below restores with zero errors.</h2>
+      <p>
+        That is measured, not claimed. <code>pg_restore</code> is perfectly happy with
+        all of them — which is the entire argument for the ladder. Each is asserted
+        in <em>both</em> directions, because a false positive costs exactly what a
+        false negative costs: a tool that cries wolf gets muted, and a muted tool is
+        worse than none because it still looks like coverage.
+      </p>
+    </div>
+    <table>
+      <thead><tr><th>Backup</th><th>What is wrong with it</th><th>Caught by</th></tr></thead>
+      <tbody>
+        <tr><td class="mono-cell">healthy</td><td>nothing</td><td class="mono-cell ok">— exit 0</td></tr>
+        <tr><td class="mono-cell">truncated_data</td><td>cut off mid-restore</td><td class="mono-cell">ARCHIVE_TRUNCATED</td></tr>
+        <tr><td class="mono-cell">truncated_header</td><td>unreadable header</td><td class="mono-cell">ARCHIVE_UNREADABLE <span class="na">· no container started</span></td></tr>
+        <tr><td class="mono-cell">missing_role</td><td><code>OWNER TO</code> a role that is absent</td><td class="mono-cell">ROLE_ABSENT</td></tr>
+        <tr><td class="mono-cell">missing_extension</td><td>hstore absent from the target image</td><td class="mono-cell">EXTENSION_ABSENT</td></tr>
+        <tr><td class="mono-cell">empty_database</td><td>a dump of the wrong database</td><td class="mono-cell">EMPTY_RESTORE</td></tr>
+        <tr><td class="mono-cell">missing_index</td><td>one index gone; data intact</td><td class="mono-cell">STRUCTURE_MISSING</td></tr>
+        <tr><td class="mono-cell">volume_drop</td><td>99% of rows deleted before the dump</td><td class="mono-cell">VOLUME_BELOW_MINIMUM</td></tr>
+        <tr><td class="mono-cell">stale_replica</td><td>schema and counts perfect, data a year old</td><td class="mono-cell">SEMANTICS_FAILED</td></tr>
+        <tr><td class="mono-cell">sequence_behind</td><td>setval below max(id)</td><td class="mono-cell">SEQUENCE_BEHIND</td></tr>
+        <tr><td class="mono-cell">collation (musl target)</td><td>text indexes sort differently</td><td class="mono-cell">COLLATION_MISMATCH</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="use">
+  <div class="wrap">
+    <div class="head">
+      <h2>A nightly restore drill, in ten lines.</h2>
+      <p>
+        No Postgres client on the host: the archive header is parsed in pure Python
+        and every database operation happens inside the target container, which is
+        what makes the version matching real.
+      </p>
+    </div>
+    <div class="two">
+      <div>
+        <p class="stamp">Locally</p>
+        <pre class="block"><span class="c">$</span> pip install firedrill
+<span class="c">$</span> firedrill run backups/nightly.dump
+
+<span class="c">  [ok  ]</span> fetch      13,572 bytes
+<span class="c">  [ok  ]</span> restore    exit 0
+<span class="r">  [FAIL]</span> semantics  1 check
+<span class="c">  [n/a ]</span> structure  no reference configured
+
+  <span class="r">FAIL</span> — recent orders exist:
+       expected &gt; 0, got 0</pre>
+      </div>
+      <div>
+        <p class="stamp">In CI</p>
+        <pre class="block"><span class="c">- uses:</span> MaXiMo000/firedrill@v0
+  <span class="c">with:</span>
+    config: firedrill.yml
+    rto: 45m
+    history: firedrill-history.json</pre>
+        <p style="color:var(--alloy);font-size:15px;margin-top:16px">
+          Fails the build when the drill fails <em>and</em> when it could not run at
+          all — “we did not verify” must never be quieter than “we verified and it
+          was fine”. Publishes the report before failing, so a red build is an
+          actionable one.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="never">
+  <div class="wrap">
+    <div class="head"><h2>What it will never do.</h2></div>
+    <div class="never">
+      <div><b>Never take backups</b>pgBackRest and WAL-G are excellent. A tool that both takes and verifies its own backups is grading its own homework.</div>
+      <div><b>Never write to production</b>Under any flag, ever. The only restore target is one it created itself and destroys in a <code>finally</code>.</div>
+      <div><b>Never print your data</b>Smoke queries return shapes — counts, booleans, comparisons. The config schema cannot express a check whose result is echoed.</div>
+      <div><b>No SaaS, no agent, no AI</b>It reports. A human decides.</div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>
+      <strong>firedrill</strong> — by
+      <a href="https://github.com/MaXiMo000">Ritish Saini</a>.
+      MIT licensed. Continues a thesis:
+      <a href="https://github.com/MaXiMo000/carabiner">carabiner</a> attacks your own
+      defences to prove they fire; firedrill restores your backup to prove it comes back.
+    </p>
+    <p class="stamp" style="margin-top:18px">
+      Verify the control. Do not trust the configuration.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>
