@@ -1,0 +1,67 @@
+# A pull request that changes your schema gets a comment saying whether last
+# night's backup still restores under it. Add to .github/workflows/.
+
+name: restore drill on PRs
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  drill:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write     # only to post the comment below
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: MaXiMo000/firedrill@v0     # CHANGE ME to a tag or commit SHA
+        id: firedrill
+        continue-on-error: true          # comment first, then fail the job
+        with:
+          config: firedrill.yml
+          # `fast` restores schema only, which is the right trade on every PR.
+          # The report says FAST in capitals so nobody mistakes this for proof
+          # that the data came back -- run the full tier on a schedule.
+          tier: fast
+
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const summary = `${{ steps.firedrill.outputs.summary }}`;
+            const ok = `${{ steps.firedrill.outputs.ok }}` === 'true';
+            const body = [
+              `### firedrill — ${ok ? '✅' : '❌'} ${summary}`,
+              '',
+              'Schema-only (`tier: fast`). Whether the **data** comes back is',
+              'checked by the nightly full run, not by this one.',
+            ].join('\n');
+
+            // Update the existing comment rather than adding one per push:
+            // a PR with thirty identical bot comments gets muted, and a muted
+            // check is worse than none.
+            const marker = '### firedrill';
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const mine = comments.find(c =>
+              c.user.type === 'Bot' && c.body.startsWith(marker));
+            if (mine) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: mine.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, body,
+              });
+            }
+
+      - name: Fail if the drill did
+        if: steps.firedrill.outcome == 'failure'
+        run: exit 1

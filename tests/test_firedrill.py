@@ -574,17 +574,20 @@ def test_config_empty_file_is_an_error():
     _rejects("empty", "\n", "empty")
 
 
-def test_config_tolerance_is_refused_until_something_records_a_baseline():
-    """The loader's own rule, applied to its author: volume.tolerance compares
-    against the last known-good restore, and nothing records one until
-    history.json. Parsed-and-never-read is the silent skip it exists to stop."""
-    _rejects("global", "version: 1\nvolume:\n  tolerance: 10%\n",
-             "not implemented yet")
-    _rejects("per table",
-             "version: 1\nvolume:\n  tables:\n    orders: {tolerance: 50%}\n",
-             "not implemented yet")
-    check("the percent parser is still correct for when it lands",
+def test_config_tolerance_now_that_history_gives_it_a_baseline():
+    """This was refused for two phases, because a tolerance needs something to
+    be tolerant *of* and nothing recorded one. history.json does now, so the
+    key is read rather than refused -- and the refusal was removed in the same
+    commit that made it readable, not before."""
+    cfg = config.loads(
+        "version: 1\nvolume:\n  tolerance: 10%\n"
+        "  tables:\n    orders: {tolerance: 50%}\n")
+    check("global tolerance", cfg.volume_tolerance, 0.10)
+    check("per-table overrides it", cfg.volume_tables["orders"].tolerance, 0.50)
+    check("still refuses a bare number",
           config.parse_percent("50%"), 0.50)
+    _rejects("bare number is still ambiguous",
+             "version: 1\nvolume:\n  tolerance: 10\n", "ambiguous")
 
 
 def test_config_empty_table_rule_is_an_error():
@@ -626,20 +629,136 @@ def test_pyproject_table_ordering_cannot_swallow_the_urls():
               position < extras, True)
 
 
+def test_action_yml_passes_only_flags_the_cli_actually_has():
+    """The GitHub Action and the CLI drift apart silently otherwise.
+
+    A renamed flag would make the action fail at run time, in somebody else's
+    nightly job, with a message about an unrecognised argument -- and the
+    build would go red for a reason that has nothing to do with their backup.
+    """
+    import re
+    text = (HERE.parent / "action.yml").read_text(encoding="utf-8")
+    used = set()
+    for line in text.splitlines():
+        if "args+=(" in line:
+            used.update(re.findall(r"--[a-z][a-z-]*", line))
+    check("the action passes some flags", len(used) >= 5, True)
+
+    known = set()
+    for action in build_parser()._subparsers._group_actions[0].choices["run"]._actions:
+        known.update(action.option_strings)
+    missing = sorted(used - known)
+    check(f"every flag exists in `firedrill run` (missing: {missing})", missing, [])
+
+
+def test_example_workflows_parse_and_pin_their_intent():
+    """They are the phase's deliverable -- a stranger copies these."""
+    import yaml as yaml_module
+    examples = sorted((HERE.parent / "examples").glob("*.yml"))
+    check("examples exist", len(examples) >= 2, True)
+    for path in examples:
+        loaded = yaml_module.safe_load(path.read_text(encoding="utf-8"))
+        check(f"{path.name} is valid yaml", isinstance(loaded, dict), True)
+        check(f"{path.name} has jobs", "jobs" in loaded, True)
+        # `on:` is the YAML 1.1 boolean True, which is a classic footgun and
+        # worth pinning: if this ever parses as the string "on", the file was
+        # quoted differently and the trigger may not be what it looks like.
+        check(f"{path.name} declares a trigger", True in loaded or "on" in loaded, True)
+
+
+def test_junit_distinguishes_skipped_from_passed():
+    """Most CI dashboards colour skipped differently from passed, which is the
+    one distinction this whole tool exists to preserve."""
+    import xml.etree.ElementTree as ET
+    report = _blank_report(verified=True)
+    report.stages[0].status = drill.OK
+    report.stages[1].status = drill.FAILED
+    report.stages[2].status = drill.NOT_RUN
+    report.stages[3].status = drill.NOT_CONFIGURED
+    report.findings.append(Finding(report.stages[1].name, "R", "high", "m", "f"))
+
+    root = ET.fromstring(reporting.as_junit(report))
+    kinds = {c.get("name"): (c[0].tag if len(c) else "pass") for c in root}
+    check("ok is a pass", kinds[report.stages[0].name], "pass")
+    check("failed is a failure", kinds[report.stages[1].name], "failure")
+    check("not run is skipped", kinds[report.stages[2].name], "skipped")
+    check("not configured is skipped", kinds[report.stages[3].name], "skipped")
+
+
+def test_junit_marks_an_unverified_run_as_failing():
+    """'Could not verify' must not read as 'nothing to report'."""
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(reporting.as_junit(_blank_report(verified=False)))
+    names = [c.get("name") for c in root]
+    check("a verified case is added", "verified" in names, True)
+    case = [c for c in root if c.get("name") == "verified"][0]
+    check("and it fails", case[0].tag, "failure")
+
+
+def test_history_records_no_data_from_inside_the_database():
+    """A history file is the artefact of this tool most likely to be committed
+    to a repo, so its field set is pinned exactly like Finding's."""
+    from firedrill import history
+    report = _blank_report(verified=True)
+    report.row_counts = {"customer": 2000}
+    entry = history._entry(report)
+    check("field set", sorted(entry), [
+        "at", "dump", "findings", "ok", "row_counts", "server_major",
+        "server_version", "size_bytes", "stages", "tier", "total_seconds",
+        "verified"])
+    check("counts are aggregates", entry["row_counts"], {"customer": 2000})
+
+
+def test_history_last_good_will_not_cross_tiers():
+    """A fast run records no row counts and a sample run only some. Comparing
+    a full run against either would invent a loss that never happened."""
+    from firedrill import history
+    entries = [
+        {"ok": True, "verified": True, "tier": "full", "total_seconds": 10.0},
+        {"ok": True, "verified": True, "tier": "fast", "total_seconds": 1.0},
+        {"ok": False, "verified": True, "tier": "full", "total_seconds": 99.0},
+    ]
+    check("newest passing full run", history.last_good(entries, "full")["total_seconds"], 10.0)
+    check("fast is matched separately", history.last_good(entries, "fast")["total_seconds"], 1.0)
+    check("a failed run is never a baseline",
+          history.last_good(entries, "full")["total_seconds"] != 99.0, True)
+    check("nothing to compare against yet", history.last_good([], "full"), None)
+    check("and trend says nothing rather than guessing",
+          history.trend([], 5.0, "full"), "")
+
+
 def test_readme_yaml_examples_actually_load():
     """Config documentation that does not parse is worse than none: it costs a
-    reader their time and their trust. Every ```yaml block in the README is
-    fed to the real loader, so the docs cannot drift away from the parser."""
+    reader their time and their trust.
+
+    The README also contains GitHub workflow snippets, which are yaml but not
+    firedrill config. They are told apart by content rather than by being
+    exempted by position -- a config example that forgets `version: 1` must
+    still fail here, which it has done twice.
+    """
     import re
+    import yaml as yaml_module
     readme = (HERE.parent / "README.md").read_text(encoding="utf-8")
     blocks = re.findall(r"```yaml\n(.*?)```", readme, re.S)
-    check("the README documents at least one config", len(blocks) >= 1, True)
+    check("the README documents at least one yaml block", len(blocks) >= 1, True)
+
+    configs = 0
     for index, block in enumerate(blocks):
+        if "uses:" in block or "jobs:" in block:
+            # A workflow snippet: it only has to be valid yaml.
+            try:
+                yaml_module.safe_load(block)
+                CHECKS[0] += 1
+            except yaml_module.YAMLError as exc:
+                FAILURES.append(f"  README workflow block {index} is not yaml\n    {exc}")
+            continue
+        configs += 1
         try:
             config.loads(block)
             CHECKS[0] += 1
         except config.ConfigError as exc:
-            FAILURES.append(f"  README yaml block {index} does not load\n    {exc}")
+            FAILURES.append(f"  README config block {index} does not load\n    {exc}")
+    check("and at least one of them is a firedrill config", configs >= 1, True)
 
 
 def test_config_defaults_when_there_is_no_file():
@@ -1413,6 +1532,70 @@ semantics:
 """, "cannot run semantics")
 
 
+def test_integration_history_becomes_the_baseline_that_catches_a_loss():
+    """The point of remembering runs, as one sequence.
+
+    Run one has nothing to compare against and says so. Run two is measured
+    against it. Run three lost 99% of its rows -- within min_rows, so only the
+    tolerance can catch it, and only because run one was recorded.
+    """
+    needs_docker()
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        path = pathlib.Path(tmp) / "history.json"
+        cfg = config.loads(f"""
+version: 1
+history: {path}
+volume:
+  tolerance: 10%
+  tables:
+    customer: {{min_rows: 1}}
+""")
+        first = drill.run(corpus("healthy_pg16.dump"), cfg=cfg)
+        check("clean", [f.rule for f in first.findings], [])
+        check("counts recorded", first.row_counts, {"customer": 2000})
+        check("nothing to compare against yet", first.trend, "")
+
+        second = drill.run(corpus("healthy_pg16.dump"), cfg=cfg)
+        check("still clean", [f.rule for f in second.findings], [])
+        check("and now there is a trend", "than the last good full run" in second.trend, True)
+
+        dropped = drill.run(corpus("volume_drop.dump"), cfg=cfg)
+        check("the loss is caught by tolerance alone",
+              [f.rule for f in dropped.findings], ["VOLUME_DRIFT"])
+        check("naming both numbers", "20 row(s), down 99% from 2000"
+              in dropped.findings[0].message, True)
+
+        entries = json.loads(path.read_text(encoding="utf-8"))
+        check("every run recorded, including the failure", len(entries), 3)
+        check("the failed run is not usable as a future baseline",
+              entries[-1]["ok"], False)
+        blob = json.dumps(entries)
+        check("and no row data reached the file", "@example.test" in blob, False)
+
+
+def test_integration_growth_is_not_a_finding():
+    """Tables grow. A rule that fired on growth would go off every week until
+    somebody muted it, taking the real findings with it."""
+    needs_docker()
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        path = pathlib.Path(tmp) / "history.json"
+        cfg = config.loads(f"""
+version: 1
+history: {path}
+volume:
+  tolerance: 10%
+  tables:
+    customer: {{min_rows: 1}}
+""")
+        # Record a small baseline first, then restore the full table: a 100x
+        # increase, far outside the 10% tolerance, and not a problem.
+        drill.run(corpus("volume_drop.dump"), cfg=cfg)
+        grown = drill.run(corpus("healthy_pg16.dump"), cfg=cfg)
+        check("20 -> 2000 is silent", [f.rule for f in grown.findings], [])
+
+
 def test_integration_leaves_no_containers_behind():
     needs_docker()
     before = set(docker.orphans())
@@ -1494,7 +1677,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 102
+    FLOOR = 111
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import pathlib
 import sys
 
 from . import __version__, config, docker, drill, report as reporting
@@ -55,6 +56,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--tier", choices=config.ALL_TIERS,
                      help="how much to restore. `fast` is schema-only: the "
                           "row-reading checks then report NOT RUN, never a pass.")
+    run.add_argument("--junit", metavar="PATH",
+                     help="write a JUnit XML report here, for CI to display")
+    run.add_argument("--history", metavar="PATH",
+                     help="append this run to a history file, and measure it "
+                          "against the last known-good run recorded there")
     run.add_argument("--quiet", action="store_true", help="suppress the table")
 
     sub.add_parser("clean", help="remove containers left behind by a crash")
@@ -87,6 +93,8 @@ def main(argv: list[str] | None = None) -> int:
             cfg = config.load(found) if found else config.DEFAULT
             if found and not args.quiet:
                 print(f"using {found}")
+        if args.history:
+            cfg = dataclasses.replace(cfg, history_path=pathlib.Path(args.history))
         if args.tier:
             cfg = dataclasses.replace(cfg, tier=args.tier)
             if args.tier not in config.IMPLEMENTED_TIERS:
@@ -110,6 +118,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.quiet:
         print(reporting.human(result))
+    if args.junit:
+        with open(args.junit, "w", encoding="utf-8") as handle:
+            handle.write(reporting.as_junit(result))
     if args.json:
         blob = reporting.as_json(result)
         if args.json == "-":

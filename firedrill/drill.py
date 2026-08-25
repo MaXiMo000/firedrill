@@ -14,7 +14,8 @@ import shutil
 import tempfile
 import time
 
-from . import archive, docker, ladder, restore as restore_stage, sources
+from . import archive, docker, history as history_module, ladder, \
+    restore as restore_stage, sources
 from . import config as _config_module
 from .config import DEFAULT as DEFAULT_CONFIG
 from .finding import DEFAULT_FAIL_ON, Finding, should_fail, worst
@@ -51,6 +52,8 @@ class Report:
     rto_budget: float | None = None
     fail_on: str = DEFAULT_FAIL_ON
     tier: str = "full"
+    row_counts: dict = dataclasses.field(default_factory=dict)
+    trend: str = ""
     suppressed: list = dataclasses.field(default_factory=list)
 
     @property
@@ -83,6 +86,8 @@ class Report:
                  "seconds": round(s.seconds, 3), "detail": s.detail}
                 for s in self.stages
             ],
+            "row_counts": self.row_counts,
+            "trend": self.trend,
             "findings": [f.as_dict() for f in self.findings],
             "suppressed": self.suppressed,
         }
@@ -101,9 +106,29 @@ def run(dump_path: str | pathlib.Path | None = None, *, cfg=None, **kw) -> Repor
     # cleanup bug cannot reach the user's own backup file.
     workdir = pathlib.Path(tempfile.mkdtemp(prefix="firedrill-"))
     try:
-        return _suppress(_run(dump_path, cfg=cfg, workdir=workdir, **kw), cfg)
+        report = _suppress(_run(dump_path, cfg=cfg, workdir=workdir, **kw), cfg)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+    # Recorded after suppression, so the history says what the run reported
+    # rather than what it would have reported with a different config. Written
+    # even for a failed run: a history that only remembers the good days
+    # cannot show you the day things changed.
+    if cfg.history_path:
+        try:
+            entries = history_module.load(cfg.history_path)
+            report.trend = history_module.trend(
+                entries, report.total_seconds, cfg.tier)
+            history_module.record(report, cfg.history_path)
+        except OSError as exc:
+            report.findings.append(Finding(
+                stage="restore", rule="HISTORY_UNWRITABLE", severity="low",
+                message=f"could not write the history file: {exc}",
+                fix="The drill itself is unaffected, but no trend will be "
+                    "visible until this is writable.",
+                evidence="",
+            ))
+    return report
 
 
 def _is_older(target: str, source: str) -> bool:
@@ -158,6 +183,11 @@ def _run(dump_path: str | pathlib.Path | None = None, *, flavour: str = "",
 
     def stage(name: str) -> Stage:
         return next(s for s in stages if s.name == name)
+
+    # The baseline this run is measured against, read before anything is
+    # restored so a failed run cannot become its own reference.
+    entries = history_module.load(cfg.history_path) if cfg.history_path else []
+    baseline = history_module.last_good(entries, cfg.tier)
 
     # -- fetch -------------------------------------------------------------
     # A positional path and a configured source both name one artefact; local
@@ -396,8 +426,11 @@ def _run(dump_path: str | pathlib.Path | None = None, *, flavour: str = "",
             stage("volume").detail = "fast tier restored no rows"
         elif cfg.volume_tables:
             started = time.monotonic()
-            found, info = ladder.volume(container, cfg, restore_stage.TARGET_DB)
+            found, info = ladder.volume(
+                container, cfg, restore_stage.TARGET_DB,
+                baseline=(baseline or {}).get("row_counts"))
             report.findings.extend(found)
+            report.row_counts = info.get("counts", {})
             stage("volume").seconds = time.monotonic() - started
             stage("volume").status = FAILED if found else OK
             stage("volume").detail = f"{len(info.get('counts', {}))} table(s) counted"

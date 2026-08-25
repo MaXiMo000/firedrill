@@ -68,6 +68,10 @@ def human(report: Report, colour: bool = False) -> str:
 
     lines.append(f"  total     {report.total_seconds:.2f}s"
                  + (f"  (budget {report.rto_budget:.0f}s)" if report.rto_budget else ""))
+    if report.trend:
+        # Context, not a finding. RTO is then a measured trend rather than a
+        # claim, which is the whole reason history.json exists.
+        lines.append(f"            {report.trend}")
     lines.append("")
     lines.append(f"  {_verdict(report)}")
     return "\n".join(lines)
@@ -111,6 +115,69 @@ def _size(n: int) -> str:
             return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
         n /= 1024.0
     return f"{n}B"
+
+
+def as_junit(report: Report) -> str:
+    """JUnit XML, so CI shows the rungs individually rather than one red X.
+
+    The mapping matters more than the format. A stage that could not run is
+    <skipped>, never a silent pass -- most CI dashboards colour skipped
+    differently from passed, which is exactly the distinction this tool exists
+    to preserve. A run that was never verified additionally carries a failing
+    case of its own, so "could not verify" cannot be read as "nothing to
+    report".
+    """
+    import xml.etree.ElementTree as ET
+
+    by_stage: dict[str, list] = {}
+    for finding in report.findings:
+        by_stage.setdefault(finding.stage, []).append(finding)
+
+    failures = sum(1 for s in report.stages if s.status == FAILED)
+    skipped = sum(1 for s in report.stages
+                  if s.status in (NOT_RUN, NOT_CONFIGURED))
+
+    suite = ET.Element("testsuite", {
+        "name": "firedrill",
+        "tests": str(len(report.stages)),
+        "failures": str(failures + (0 if report.verified else 1)),
+        "skipped": str(skipped),
+        "time": f"{report.total_seconds:.3f}",
+    })
+    suite.set("timestamp", _now())
+
+    for stage in report.stages:
+        case = ET.SubElement(suite, "testcase", {
+            "classname": f"firedrill.{report.tier}",
+            "name": stage.name,
+            "time": f"{stage.seconds:.3f}",
+        })
+        if stage.status in (NOT_RUN, NOT_CONFIGURED):
+            ET.SubElement(case, "skipped", {
+                "message": f"{stage.status}: {stage.detail or 'no reason recorded'}"})
+        elif stage.status == FAILED:
+            found = by_stage.get(stage.name, ())
+            failure = ET.SubElement(case, "failure", {
+                "message": "; ".join(f.rule for f in found) or "failed",
+                "type": "finding",
+            })
+            failure.text = "\n\n".join(
+                f"{f.severity.upper()} {f.rule}\n{f.message}\n{f.fix}" for f in found)
+
+    if not report.verified:
+        case = ET.SubElement(suite, "testcase", {
+            "classname": f"firedrill.{report.tier}", "name": "verified", "time": "0"})
+        failure = ET.SubElement(case, "failure", {
+            "message": "the restore could not be verified", "type": "unverified"})
+        failure.text = ("This backup has NOT been proved to work. A verification "
+                        "that could not run is not a pass.")
+
+    return ET.tostring(suite, encoding="unicode") + "\n"
+
+
+def _now() -> str:
+    import time
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
 
 
 def as_json(report: Report) -> str:

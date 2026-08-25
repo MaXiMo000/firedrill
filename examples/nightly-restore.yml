@@ -1,0 +1,57 @@
+# Copy this into .github/workflows/ and change the two lines marked CHANGE ME.
+#
+# What it does: every night, fetches your newest backup, restores it into a
+# disposable version-matched Postgres, checks the result, and fails loudly if
+# the backup has stopped being restorable. It also fails when it *could not*
+# check, because "we did not verify" must never be quieter than "we verified".
+
+name: nightly restore drill
+
+on:
+  schedule:
+    - cron: "17 3 * * *"    # nightly, off the hour: every runner is busy at :00
+  workflow_dispatch: {}      # and a button, for the day you need to know now
+
+permissions:
+  contents: read
+
+jobs:
+  drill:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write        # for AWS OIDC below; drop if you use a presigned URL
+    steps:
+      - uses: actions/checkout@v5
+
+      # CHANGE ME. Read-only credentials, from the environment, never a flag.
+      # A role that can GetObject and ListBucket on the backup prefix and
+      # nothing else is the whole permission set firedrill needs.
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::000000000000:role/firedrill-readonly
+          aws-region: eu-west-1
+
+      # Keeps the RTO trend across runs, so "our restore got 40% slower this
+      # quarter" is visible before it matters rather than during an outage.
+      - uses: actions/cache@v4
+        with:
+          path: firedrill-history.json
+          key: firedrill-history-${{ github.run_id }}
+          restore-keys: firedrill-history-
+
+      - uses: MaXiMo000/firedrill@v0        # CHANGE ME to a tag or commit SHA
+        id: firedrill
+        with:
+          config: firedrill.yml
+          rto: 45m
+          history: firedrill-history.json
+
+      # Always uploaded: the run that fails is the one whose report you want.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: firedrill-report
+          path: |
+            firedrill-report.json
+            firedrill-junit.xml

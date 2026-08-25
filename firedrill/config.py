@@ -36,14 +36,6 @@ class ConfigError(Exception):
     """A config that cannot be honoured exactly as written."""
 
 
-_NO_TOLERANCE_YET = (
-    "{where} is not implemented yet. A tolerance is measured against the last "
-    "known-good restore, and nothing records one until history.json arrives "
-    "(PLAN.md §9 Phase 3). Refused rather than accepted-and-ignored: a key "
-    "that parses and is never read is the silent skip this loader exists to "
-    "prevent. Use min_rows for an absolute floor in the meantime."
-)
-
 # The only tier implemented. fast/sample are PLAN.md §9 Phase 2; accepting
 # either now would run a full restore and report the tier the user asked for,
 # which is a lie about what was verified.
@@ -167,6 +159,7 @@ class Config:
     version: int = 1
     tier: str = "full"
     rto_budget: float | None = None
+    history_path: pathlib.Path | None = None
     structure_reference: pathlib.Path | None = None
     volume_tolerance: float | None = None
     volume_tables: dict = dataclasses.field(default_factory=dict)
@@ -185,8 +178,8 @@ class Config:
 
 DEFAULT = Config()
 
-_TOP = ("version", "source", "target", "tier", "rto_budget", "structure",
-        "volume", "semantics", "sample", "ignore")
+_TOP = ("version", "source", "target", "tier", "rto_budget", "history",
+        "structure", "volume", "semantics", "sample", "ignore")
 
 _SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 
@@ -239,6 +232,9 @@ def loads(text: str, path: pathlib.Path | None = None) -> Config:
             "verified -- and so is the reverse."
         )
 
+    history = raw.get("history")
+    history_path = pathlib.Path(history) if history else None
+
     rto = raw.get("rto_budget")
     rto_budget = parse_duration(rto) if rto is not None else None
 
@@ -255,9 +251,8 @@ def loads(text: str, path: pathlib.Path | None = None) -> Config:
     # nothing records one until history.json arrives in Phase 3. Parsing it and
     # then never reading it would be precisely the silently-ignored key that
     # _reject_unknown exists to prevent -- the rule has to bind its author too.
-    if "tolerance" in volume:
-        raise ConfigError(_NO_TOLERANCE_YET.format(where="volume.tolerance"))
-    volume_tolerance = None
+    volume_tolerance = (
+        parse_percent(volume["tolerance"]) if "tolerance" in volume else None)
 
     volume_tables: dict[str, VolumeRule] = {}
     for name, spec in _require_mapping(volume.get("tables"), "volume.tables").items():
@@ -280,10 +275,10 @@ def loads(text: str, path: pathlib.Path | None = None) -> Config:
             raise ConfigError(
                 f"volume.tables.{name}.min_rows must be a non-negative integer"
             )
-        if "tolerance" in spec:
-            raise ConfigError(
-                _NO_TOLERANCE_YET.format(where=f"volume.tables.{name}.tolerance"))
-        volume_tables[str(name)] = VolumeRule(min_rows=min_rows)
+        volume_tables[str(name)] = VolumeRule(
+            min_rows=min_rows,
+            tolerance=parse_percent(spec["tolerance"]) if "tolerance" in spec
+            else None)
 
     # -- sample ------------------------------------------------------------
     sample = _require_mapping(raw.get("sample"), "sample")
@@ -337,6 +332,7 @@ def loads(text: str, path: pathlib.Path | None = None) -> Config:
         source=source,
         tier=tier,
         rto_budget=rto_budget,
+        history_path=history_path,
         structure_reference=structure_reference,
         volume_tolerance=volume_tolerance,
         volume_tables=volume_tables,

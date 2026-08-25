@@ -17,10 +17,11 @@ confidence.
 
 ## Status
 
-**Phases 0 and 1.** A local `pg_dump` custom-format file, restored into an
-ephemeral version-matched container, then put through the ladder: structure,
-volume, semantics and integrity. S3/GCS sources and the `fast`/`sample` tiers
-are Phase 2 — see `PLAN.md`.
+**Phases 0–3.** Fetch (local, presigned URL, or S3, checksum-verified),
+restore into an ephemeral version-matched container, then the ladder:
+structure, volume, semantics, integrity. Three tiers, JUnit and JSON output,
+a history file that turns RTO into a measured trend, and a GitHub Action.
+Point-in-time recovery is Phase 4 — see `PLAN.md`.
 
 What works today:
 
@@ -215,6 +216,7 @@ tick. "Nothing asked for this" and "this passed" are different facts.
 | `RTO_EXCEEDED` | slower than the stated budget |
 | `FETCH_FAILED` | the artefact could not be obtained, or is not the bytes that were claimed |
 | `SOURCE_AMBIGUOUS` | a path *and* a configured source — which backup did you mean? |
+| `VOLUME_DRIFT` | a table lost more rows than the tolerance allows, against the last known-good run |
 | `VERSION_MISMATCH` | `--postgres` pinned a major the archive did not come from |
 | `STRUCTURE_MISSING` | an object in the committed reference did not come back |
 | `STRUCTURE_UNEXPECTED` | the database has drifted from the reference |
@@ -244,6 +246,61 @@ and "archive truncated" need different findings and different fixes. firedrill
 therefore uses both signals and reports which one fired — with `EXIT_CODE_LIED`
 kept as a guard, because the tool must not depend on that measurement staying
 true in a future release.
+
+## In CI, in ten lines
+
+```yaml
+- uses: MaXiMo000/firedrill@v0
+  with:
+    config: firedrill.yml
+    rto: 45m
+    history: firedrill-history.json
+```
+
+The action fails the build when the drill fails **and** when it could not run
+at all — "we did not verify" must never be quieter than "we verified and it
+was fine". It publishes the report before failing, so a red build is an
+actionable one, and exposes `ok`, `verified`, `findings`, `seconds` and a
+`summary` like `restored in 4m12s, 0 findings`.
+
+Copy-paste templates live in [`examples/`](examples/): a nightly full drill
+with read-only AWS credentials via OIDC, and a PR comment that runs the fast
+tier and edits its own comment instead of posting a new one each push.
+
+`--junit report.xml` writes JUnit XML so CI shows each rung separately. A rung
+that could not run is `<skipped>`, never a silent pass, because most
+dashboards colour those differently — which is exactly the distinction worth
+preserving.
+
+## Trends: RTO you have measured, not claimed
+
+```bash
+firedrill run dump.dump --history firedrill-history.json
+```
+
+Each run appends its durations, row counts and versions, and is measured
+against the last known-good run *of the same tier*. The report then says
+`19% slower than the last good full run (2.3s on 2026-08-24T…)`.
+
+That history is also what makes `volume.tolerance` meaningful — a tolerance
+needs something to be tolerant of:
+
+```yaml
+version: 1
+volume:
+  tolerance: 10%
+  tables:
+    audit_log: {tolerance: 50%}   # append-only, grows fast
+```
+
+Only a **drop** past the tolerance is a finding. Tables grow; a rule that
+fired on growth would go off every week until somebody muted it, taking the
+real findings with it.
+
+The history file holds counts, durations and versions — aggregates and
+catalog facts. It has no field that could hold a row, which is pinned by a
+test, because it is the artefact of this tool most likely to be committed to
+a repo by accident.
 
 ## Prior art, honestly
 

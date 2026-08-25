@@ -1,0 +1,143 @@
+name: firedrill
+description: Restore a Postgres backup into a disposable container and prove it is usable.
+author: MaXiMo000
+
+branding:
+  icon: shield
+  color: red
+
+inputs:
+  dump:
+    description: >-
+      Path to a pg_dump custom-format archive. Omit when firedrill.yml defines
+      a source; giving both is refused rather than guessed at.
+    required: false
+    default: ""
+  config:
+    description: Path to firedrill.yml. Defaults to one beside the checkout.
+    required: false
+    default: ""
+  tier:
+    description: full | fast | sample. A partial tier reports which rungs did not run.
+    required: false
+    default: ""
+  fail-on:
+    description: Lowest severity that fails the build (critical|high|medium|low|info).
+    required: false
+    default: high
+  rto:
+    description: Recovery-time budget, e.g. 45m. Exceeding it is a finding, not a crash.
+    required: false
+    default: ""
+  history:
+    description: >-
+      History file to append to and measure against. Commit it, or restore it
+      from cache, and RTO becomes a measured trend instead of a claim.
+    required: false
+    default: ""
+  junit:
+    description: Where to write JUnit XML. Empty to skip.
+    required: false
+    default: firedrill-junit.xml
+  json:
+    description: Where to write the machine-readable report. Empty to skip.
+    required: false
+    default: firedrill-report.json
+  version:
+    description: Version of firedrill to install (a PyPI specifier).
+    required: false
+    default: ""
+
+outputs:
+  ok:
+    description: "true only when the restore genuinely ran and found nothing at or above fail-on."
+    value: ${{ steps.drill.outputs.ok }}
+  verified:
+    description: "true when a restore actually happened. false means COULD NOT VERIFY."
+    value: ${{ steps.drill.outputs.verified }}
+  findings:
+    description: Number of findings reported.
+    value: ${{ steps.drill.outputs.findings }}
+  seconds:
+    description: Total duration, for an RTO trend.
+    value: ${{ steps.drill.outputs.seconds }}
+  summary:
+    description: One line, e.g. "restored in 4m12s, 0 findings".
+    value: ${{ steps.drill.outputs.summary }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install firedrill
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -m pip install --disable-pip-version-check --quiet \
+          "firedrill${{ inputs.version && format('=={0}', inputs.version) || '' }}[s3]"
+
+    - name: Restore the backup and report
+      id: drill
+      shell: bash
+      # `|| true` deliberately: a non-zero exit is the expected outcome of a
+      # broken backup, and the step must still publish its outputs and summary
+      # before the build is failed below. Losing the report is how a red build
+      # becomes an unactionable one.
+      run: |
+        set -uo pipefail
+        args=(run)
+        [ -n "${{ inputs.dump }}" ]     && args+=("${{ inputs.dump }}")
+        [ -n "${{ inputs.config }}" ]   && args+=(--config "${{ inputs.config }}")
+        [ -n "${{ inputs.tier }}" ]     && args+=(--tier "${{ inputs.tier }}")
+        [ -n "${{ inputs.rto }}" ]      && args+=(--rto "${{ inputs.rto }}")
+        [ -n "${{ inputs.history }}" ]  && args+=(--history "${{ inputs.history }}")
+        [ -n "${{ inputs.junit }}" ]    && args+=(--junit "${{ inputs.junit }}")
+        [ -n "${{ inputs.json }}" ]     && args+=(--json "${{ inputs.json }}")
+        args+=(--fail-on "${{ inputs.fail-on }}")
+
+        firedrill "${args[@]}" | tee firedrill-output.txt || true
+
+        report="${{ inputs.json }}"
+        if [ -n "$report" ] && [ -f "$report" ]; then
+          python3 - "$report" >> "$GITHUB_OUTPUT" <<'PY'
+        import json, sys
+        r = json.load(open(sys.argv[1]))
+        mins, secs = divmod(r["total_seconds"], 60)
+        when = f"{int(mins)}m{secs:04.1f}s" if mins else f"{secs:.1f}s"
+        n = len(r["findings"])
+        if not r["verified"]:
+            summary = "COULD NOT VERIFY -- this backup has not been proved to work"
+        else:
+            summary = f"restored in {when}, {n} finding{'' if n == 1 else 's'}"
+        print(f"ok={str(r['ok']).lower()}")
+        print(f"verified={str(r['verified']).lower()}")
+        print(f"findings={n}")
+        print(f"seconds={r['total_seconds']}")
+        print(f"summary={summary}")
+        PY
+        fi
+
+    - name: Job summary
+      shell: bash
+      if: always()
+      run: |
+        {
+          echo "### firedrill"
+          echo ""
+          echo "${{ steps.drill.outputs.summary || 'firedrill did not produce a report' }}"
+          echo ""
+          echo '```'
+          cat firedrill-output.txt 2>/dev/null || echo "no output captured"
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Fail the build when the drill did
+      shell: bash
+      # Separated from the run step so the report is always published first.
+      # A backup that could not be verified fails here too: "we could not
+      # check" must never be quieter than "we checked and it was fine".
+      run: |
+        set -euo pipefail
+        if [ "${{ steps.drill.outputs.ok }}" != "true" ]; then
+          echo "::error::${{ steps.drill.outputs.summary || 'firedrill failed' }}"
+          exit 1
+        fi

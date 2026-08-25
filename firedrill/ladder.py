@@ -179,11 +179,16 @@ def structure(container, cfg, database: str) -> tuple[list[Finding], dict]:
 
 # ------------------------------------------------------------------ volume --
 
-def volume(container, cfg, database: str) -> tuple[list[Finding], dict]:
+def volume(container, cfg, database: str,
+           baseline: dict | None = None) -> tuple[list[Finding], dict]:
     """Row counts against the minimums the config states.
 
     A table that lost 90% of its rows restores perfectly and passes every
     structural check, so this is the rung that catches it.
+
+    Only a DROP past the tolerance is a finding. Tables grow -- that is what
+    tables do -- and a rule that fired on growth would go off every week until
+    somebody muted it, taking the real findings with it.
     """
     findings: list[Finding] = []
     counts: dict[str, int] = {}
@@ -229,6 +234,24 @@ def volume(container, cfg, database: str) -> tuple[list[Finding], dict]:
                     "or whether the dump was taken from the wrong database.",
                 evidence="",
             ))
+
+        # Tolerance is measured against the last known-good run of the same
+        # tier, which is what history.json is for.
+        previous = (baseline or {}).get(table)
+        tolerance = rule.tolerance if rule.tolerance is not None else cfg.volume_tolerance
+        if previous and tolerance is not None and count < previous:
+            lost = (previous - count) / previous
+            if lost > tolerance:
+                findings.append(Finding(
+                    stage="volume", rule="VOLUME_DRIFT", severity="high",
+                    message=f"{table} restored {count} row(s), down {lost * 100:.0f}% "
+                            f"from {previous} in the last known-good run; the "
+                            f"tolerance is {tolerance * 100:.0f}%",
+                    fix="Rows that were in the last good restore are not in this "
+                        "one. Either the source lost them or the backup did, and "
+                        "both are worth knowing before the outage.",
+                    evidence="",
+                ))
 
     return findings, {"counts": counts}
 
