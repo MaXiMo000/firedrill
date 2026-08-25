@@ -19,11 +19,11 @@ confidence.
 
 ## Status
 
-**Phases 0–3.** Fetch (local, presigned URL, or S3, checksum-verified),
+**Phases 0–4.** Fetch (local, presigned URL, or S3, checksum-verified),
 restore into an ephemeral version-matched container, then the ladder:
 structure, volume, semantics, integrity. Three tiers, JUnit and JSON output,
-a history file that turns RTO into a measured trend, and a GitHub Action.
-Point-in-time recovery is Phase 4 — see `PLAN.md`.
+a history file that turns RTO into a measured trend, a GitHub Action, and
+point-in-time recovery. See `PLAN.md` for what is deliberately not built.
 
 What works today:
 
@@ -219,6 +219,9 @@ tick. "Nothing asked for this" and "this passed" are different facts.
 | `FETCH_FAILED` | the artefact could not be obtained, or is not the bytes that were claimed |
 | `SOURCE_AMBIGUOUS` | a path *and* a configured source — which backup did you mean? |
 | `VOLUME_DRIFT` | a table lost more rows than the tolerance allows, against the last known-good run |
+| `SEQUENCE_UNCHECKED` | the database has sequences and none could be tied to a column, so none were checked |
+| `PITR_TARGET_UNREACHED` | the WAL archive ends before the moment you asked to recover to |
+| `PITR_UNASSERTED` | recovery reached the target and nothing checked what the database then held |
 | `VERSION_MISMATCH` | `--postgres` pinned a major the archive did not come from |
 | `STRUCTURE_MISSING` | an object in the committed reference did not come back |
 | `STRUCTURE_UNEXPECTED` | the database has drifted from the reference |
@@ -303,6 +306,45 @@ The history file holds counts, durations and versions — aggregates and
 catalog facts. It has no field that could hold a row, which is pinned by a
 test, because it is the artefact of this tool most likely to be committed to
 a repo by accident.
+
+## Point-in-time recovery
+
+A dump proves you can get *a* database back. PITR proves you can get it back to
+a **chosen moment** — which is what you need after a `DELETE` without a `WHERE`
+at 14:02. Almost nobody tests it, because testing it means performing it.
+
+```bash
+firedrill pitr \
+  --base /backups/base --wal /backups/wal \
+  --target '2026-08-25 14:01:00' --config firedrill.yml
+```
+
+The assertion has two halves, and it needs both:
+
+```yaml
+version: 1
+semantics:
+  - name: the row written before the target survived
+    sql: select count(*) from events where label = 'before'
+    expect: "== 1"
+  - name: the row written after the target did not
+    sql: select count(*) from events where label = 'after'
+    expect: "== 0"
+```
+
+Restoring *everything* satisfies the first. Restoring *nothing* satisfies the
+second. Only together do they say recovery stopped where it was told. Configure
+neither and firedrill reports `PITR_UNASSERTED` rather than calling it a pass —
+a server that came up proves a server came up.
+
+Two things measured on PostgreSQL 16 that shaped this:
+
+- An unreachable target does **not** silently promote. Recovery exits with
+  `FATAL: recovery ended before configured recovery target was reached`, so
+  "did it get there" needs no heuristic.
+- `recovery_target_time` counts as reached only when a commit with a **later**
+  timestamp exists in the WAL. A target after the final commit is *unreached*,
+  not "satisfied at end of WAL".
 
 ## Prior art, honestly
 

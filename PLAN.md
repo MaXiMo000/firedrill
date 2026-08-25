@@ -415,3 +415,55 @@ the launch.
   collation version mismatch on restore. Text indexes sort differently, queries
   return wrong rows, and nothing errors.
 - *"Tell me about a control most teams have but have never verified."* — This.
+
+---
+
+## 12. Decisions, and measurements worth not rediscovering
+
+Moved here when `HANDOFF.md` was retired. Everything below was measured against
+real PostgreSQL, and several entries contradict what a careful person would
+reasonably have assumed.
+
+### Decisions argued and settled
+
+- **Debian `postgres:<major>`, never alpine by default.** musl vs glibc would
+  mismatch collation by default — the exact silent corruption §3.4 exists to
+  detect. A test pins the default so it cannot drift back.
+- **`pg_restore` runs inside the container**, so client and server are both the
+  dump's major version and the host needs no Postgres client at all.
+- **The header is parsed in pure Python**, decoded from real dumps (archive
+  1.14 / 1.15 / 1.16). This resolves a bootstrap problem: you cannot ask a
+  version-matched container what version to be.
+- **No `--tmpfs`.** Its fallback rule needs the restored size, which a
+  compressed archive cannot tell you.
+- **No DSN target exists yet** — the safest implementation of "refuses any
+  target it did not create" is to have no other target. §7's four interlocks
+  arrive with the DSN target.
+- **No dependencies.** Phase 0 is stdlib only. Phase 1 added **PyYAML** and
+  nothing else.
+
+### Decisions added during Phase 1
+
+- **No psycopg, and no published port.** This overturns PLAN.md §5. Phase 0
+  already shipped `container.sql()`, and `docker.py` publishes no port at all
+  — "not reachable from the host" is a §7 safety property. psycopg would have
+  required spending it to get typed results for queries that only ever return
+  a single number. Every rung uses `docker exec psql -tA`.
+- **`ladder.py` is one flat module**, not the `stages/` package §5 sketches.
+  Four functions sit beside `archive.py` and `restore.py`, matching the layout
+  the package already has.
+- **`NOT_CONFIGURED` is a distinct stage status.** "Nothing asked for this" and
+  "this was asked for and could not run" are different facts, and neither is a
+  tick. The report prints `n/a`.
+- **Suppression is applied in one place**, wrapping `_run`, because `_run` can
+  return from five points and a missed one would silently un-suppress a
+  finding — or hide one nobody asked to hide. Suppressed findings are printed
+  with their written reason, never deleted.
+- **The structure reference excludes internal schemas and `contype = 'n'`.**
+  Both were measured, not reasoned: `pg_toast` indexes made the first
+  reference 48 lines of per-database OIDs, and PG18 materialises NOT NULL as
+  `pg_constraint` rows where PG16 does not, so a pg16 reference called every
+  not-null column drift on pg18. One reference is now portable across majors,
+  and a test asserts it.
+
+
