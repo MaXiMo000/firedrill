@@ -1,4 +1,9 @@
-name: firedrill
+# GitHub Marketplace requires a name that collides with no existing
+# action, user or organization -- and `firedrill` is taken by an
+# organization. This is the Marketplace display name only: the package
+# is still `pip install firedrill` and the action is still
+# `MaXiMo000/firedrill@v0`.
+name: Postgres firedrill
 description: Restore a Postgres backup into a disposable container and prove it is usable.
 author: MaXiMo000
 

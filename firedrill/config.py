@@ -36,9 +36,6 @@ class ConfigError(Exception):
     """A config that cannot be honoured exactly as written."""
 
 
-# The only tier implemented. fast/sample are PLAN.md §9 Phase 2; accepting
-# either now would run a full restore and report the tier the user asked for,
-# which is a lie about what was verified.
 IMPLEMENTED_TIERS = ("full", "fast", "sample")
 ALL_TIERS = ("fast", "sample", "full")
 
@@ -224,13 +221,9 @@ def loads(text: str, path: pathlib.Path | None = None) -> Config:
     tier = raw.get("tier", "full")
     if tier not in ALL_TIERS:
         raise ConfigError(f"tier {tier!r} must be one of {', '.join(ALL_TIERS)}")
-    if tier not in IMPLEMENTED_TIERS:
-        raise ConfigError(
-            f"tier {tier!r} is not implemented yet (PLAN.md §9 Phase 2). "
-            "Refused rather than silently upgraded to `full`, because a report "
-            "saying 'fast' when a full restore ran is a lie about what was "
-            "verified -- and so is the reverse."
-        )
+    # Every tier in ALL_TIERS is implemented, so there is no "declared but not
+    # built" branch left to guard. It is deleted rather than kept as a
+    # comforting no-op: an unreachable refusal reads like a live one.
 
     history = raw.get("history")
     history_path = pathlib.Path(history) if history else None
