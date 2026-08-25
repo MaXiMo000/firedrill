@@ -193,11 +193,27 @@ def build_pitr(outdir: pathlib.Path) -> dict:
         # simply runs out of WAL and reports the target as unreached -- which is
         # a different failure from the one this fixture exists to demonstrate.
         psql("insert into events(label) values ('sentinel');")
-        # Force the segment holding both writes into the archive, or recovery
-        # has nothing to replay and the fixture silently tests nothing.
-        psql("select pg_switch_wal();")
+
+        # Force the segment holding the writes into the archive, then WAIT FOR
+        # IT. archive_command runs asynchronously, so a fixed sleep is a race:
+        # it passed locally and failed on both CI runners, where the archiver
+        # had not finished. WAL filenames sort in order, so comparing against
+        # last_archived_wal is an exact condition rather than a guess at how
+        # long a machine needs.
+        switched = psql("select pg_walfile_name(pg_switch_wal())",
+                        tuples_only=True).stdout.strip()
         psql("checkpoint;")
-        time.sleep(1)
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            archived = psql("select coalesce(last_archived_wal, '') "
+                            "from pg_stat_archiver", tuples_only=True).stdout.strip()
+            if archived and archived >= switched:
+                break
+            time.sleep(0.5)
+        else:
+            raise RuntimeError(
+                f"WAL segment {switched} was never archived; the fixture would "
+                "have tested nothing")
 
         sh("docker", "cp", f"{name}:/tmp/base/.", str(base_out))
     finally:

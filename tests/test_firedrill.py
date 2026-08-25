@@ -1789,6 +1789,64 @@ def test_integration_pitr_reads_the_major_from_the_base_backup():
             check("says what is wrong", "base backup" in str(exc), True)
 
 
+def test_integration_sequences_wired_only_by_default_are_still_checked():
+    """A field-test regression, and the most valuable bug this project has
+    found in itself.
+
+    firedrill originally found a sequence's column through pg_depend, i.e.
+    ownership -- `serial` or an explicit OWNED BY. Measured against pagila, a
+    schema thousands of people use: it links all 13 of its sequences purely
+    through the column DEFAULT, with no OWNED BY anywhere, and
+    pg_get_serial_sequence resolves none of them either. So SEQUENCE_BEHIND
+    examined nothing, reported "0 sequence(s)", and the run went green.
+
+    A check that silently checks nothing is the exact failure this whole
+    project exists to prevent, so it is pinned here with a schema built the
+    way pagila builds one.
+    """
+    needs_docker()
+    import make_corpus
+    with make_corpus.Source(make_corpus.VERSIONS[0]) as src:
+        src.psql("create database unowned_seq;")
+        # No serial, no OWNED BY: the sequence is joined to the column by the
+        # DEFAULT expression alone, exactly as pagila does it.
+        src.psql("create sequence thing_id_seq;", db="unowned_seq")
+        src.psql("create table thing(id integer default nextval('thing_id_seq') "
+                 "primary key, label text);", db="unowned_seq")
+        src.psql("insert into thing(label) select 'x' from generate_series(1,50);",
+                 db="unowned_seq")
+        # Behind max(id): the failure a real restore would hide.
+        src.psql("select setval('thing_id_seq', 5, true);", db="unowned_seq")
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            dump = src.dump(pathlib.Path(tmp) / "unowned.dump", db="unowned_seq")
+            report = drill.run(dump)
+
+    check("the sequence is found and its lag reported",
+          "SEQUENCE_BEHIND" in {f.rule for f in report.findings}, True)
+    check("and it was genuinely checked, not counted as zero",
+          "0 sequence(s)" in report.stage("integrity").detail, False)
+
+
+def test_integration_a_database_whose_sequences_cannot_be_linked_says_so():
+    """The honesty half. If none of the sequences can be tied to a column,
+    'checked zero' must not read like 'there are none'."""
+    needs_docker()
+    import make_corpus
+    with make_corpus.Source(make_corpus.VERSIONS[0]) as src:
+        src.psql("create database loose_seq;")
+        src.psql("create sequence orphan_seq;", db="loose_seq")
+        src.psql("create table plain(id int primary key);", db="loose_seq")
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            dump = src.dump(pathlib.Path(tmp) / "loose.dump", db="loose_seq")
+            report = drill.run(dump)
+
+    check("reported", "SEQUENCE_UNCHECKED" in {f.rule for f in report.findings}, True)
+    check("naming how many were skipped",
+          "1 sequence(s) and none could be linked" in report.findings[0].message, True)
+
+
 def test_integration_leaves_no_containers_behind():
     needs_docker()
     before = set(docker.orphans())
@@ -1870,7 +1928,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 120
+    FLOOR = 122
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "

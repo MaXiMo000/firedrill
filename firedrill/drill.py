@@ -233,12 +233,25 @@ def run_pitr(base, wal, target: str, *, cfg=None, flavour: str = "",
         report.findings.extend(integ)
         stage("integrity").seconds = time.monotonic() - started
         stage("integrity").status = FAILED if integ else OK
-        stage("integrity").detail = f"{info.get('sequences', 0)} sequence(s)"
+        stage("integrity").detail = _sequence_detail(info)
     finally:
         container.teardown()
 
     report.total_seconds = time.monotonic() - began
     return _suppress(report, cfg)
+
+
+def _sequence_detail(info: dict) -> str:
+    """`9 of 13 sequence(s)` when some could not be linked to a column.
+
+    Partial coverage is worth seeing. pagila links 9 of its 13, and a bare
+    "9 sequence(s)" reads like completeness.
+    """
+    checked = info.get("sequences", 0)
+    present = info.get("sequences_present", checked)
+    if present and present != checked:
+        return f"{checked} of {present} sequence(s)"
+    return f"{checked} sequence(s)"
 
 
 def _served_major(container) -> str | None:
@@ -594,7 +607,7 @@ def _run(dump_path: str | pathlib.Path | None = None, *, flavour: str = "",
         # for a sample run would be wrong: the rows are there, the setval is
         # not, because it is not part of a -t data restore.
         stage("integrity").detail = (
-            f"{info.get('sequences', 0)} sequence(s)" if cfg.tier == "full"
+            _sequence_detail(info) if cfg.tier == "full"
             else "collation only -- fast tier restored no rows"
             if cfg.tier == "fast"
             else "collation only -- a sampled restore does not carry setval")

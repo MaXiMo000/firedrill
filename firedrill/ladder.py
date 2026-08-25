@@ -398,7 +398,19 @@ def collation(container, cfg, database: str) -> tuple[list[Finding], dict]:
 # Sequence and its owning column, for every serial/identity column in the
 # database. Restored sequences are the classic post-failover landmine: the
 # data is all there, and the first insert raises a duplicate key.
-_SEQUENCES = """
+# Two ways a sequence can feed a column, and real databases use both.
+#
+# The first is ownership -- `serial`, or an explicit OWNED BY -- recorded in
+# pg_depend. That is all this query used to match, and it was measured against
+# pagila, a schema thousands of people use: the answer there is ZERO. Pagila
+# links its 13 sequences purely through the column DEFAULT, with no OWNED BY
+# anywhere, and `pg_get_serial_sequence` resolves none of them either. So the
+# sequence check examined nothing and the run went green, which is exactly the
+# failure this project exists to prevent.
+#
+# The second reads nextval() out of the default expression. UNION dedupes a
+# column that has both.
+_SEQUENCES = r"""
 select n.nspname, c.relname, tn.nspname, t.relname, a.attname
 from pg_class c
 join pg_namespace n on n.oid = c.relnamespace
@@ -407,7 +419,26 @@ join pg_depend d on d.objid = c.oid and d.classid = 'pg_class'::regclass
 join pg_class t on t.oid = d.refobjid
 join pg_namespace tn on tn.oid = t.relnamespace
 join pg_attribute a on a.attrelid = t.oid and a.attnum = d.refobjsubid
-where c.relkind = 'S' and n.nspname not in ('pg_catalog', 'information_schema')
+where c.relkind = 'S' and n.nspname !~ '^pg_' and n.nspname <> 'information_schema'
+union
+select sn.nspname, s.relname, tn.nspname, t.relname, a.attname
+from pg_attrdef ad
+join pg_class t on t.oid = ad.adrelid
+join pg_namespace tn on tn.oid = t.relnamespace
+join pg_attribute a on a.attrelid = ad.adrelid and a.attnum = ad.adnum
+  and not a.attisdropped
+join pg_class s
+  on s.oid = to_regclass(substring(pg_get_expr(ad.adbin, ad.adrelid)
+                                   from 'nextval\(''([^'']+)'''))
+join pg_namespace sn on sn.oid = s.relnamespace
+where s.relkind = 'S' and tn.nspname !~ '^pg_' and tn.nspname <> 'information_schema'
+"""
+
+# How many sequences exist at all, so "checked none" can be told apart from
+# "there are none". Only one of those is reassuring.
+_SEQUENCE_COUNT = """
+select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace
+where c.relkind = 'S' and n.nspname !~ '^pg_' and n.nspname <> 'information_schema'
 """
 
 
@@ -483,4 +514,26 @@ def integrity(container, cfg, database: str,
     collation_findings, collation_info = collation(container, cfg, database)
     findings.extend(collation_findings)
 
-    return findings, {"sequences": checked, **collation_info}
+    # "I checked zero sequences" and "there are zero sequences" are different
+    # facts, and only one of them is reassuring. pagila made the difference
+    # concrete: 13 sequences present, none reachable by the old query, and a
+    # perfectly green report.
+    present = container.sql(_SEQUENCE_COUNT.strip(), database=database)
+    try:
+        total = int(present.stdout.strip() or 0)
+    except ValueError:
+        total = 0
+    if total and not checked:
+        findings.append(Finding(
+            stage="integrity", rule="SEQUENCE_UNCHECKED", severity="medium",
+            message=f"the database has {total} sequence(s) and none could be "
+                    "linked to a column, so none were checked",
+            fix="firedrill finds a sequence's column through ownership or "
+                "through the column's DEFAULT. This database uses neither, so "
+                "the sequence check proved nothing here. Reported rather than "
+                "left looking like a pass.",
+            evidence="",
+        ))
+
+    return findings, {"sequences": checked, "sequences_present": total,
+                      **collation_info}

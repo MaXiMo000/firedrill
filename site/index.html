@@ -324,6 +324,17 @@ exit <span style="color:var(--escalate)">1</span></pre>
       </div>
 
       <div class="find">
+        <div class="stamp">Field test · pagila</div>
+        <h4>13 sequences, 0 checked, report green</h4>
+        <p>pagila links every sequence through the column DEFAULT, with no
+        <code>OWNED BY</code> anywhere — and <code>pg_get_serial_sequence</code>
+        resolves none of them. The sequence check examined nothing and said so as
+        <em>“0 sequence(s)”</em>, which reads like “fine”. Found by restoring
+        databases this project did not write.</p>
+<pre>present <span style="color:var(--escalate)">13</span>  ·  linked 0  →  now 9 of 13</pre>
+      </div>
+
+      <div class="find">
         <div class="stamp">Toolchain · Windows runners</div>
         <h4>bash -n exits 1 with empty stderr</h4>
         <p>Because <code>bash</code> there is the WSL stub. A failure with no message
