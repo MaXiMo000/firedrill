@@ -59,7 +59,7 @@ not a feature, they are the price of admission.
 
 ## Status
 
-**Phase 0 and Phase 1 are built and green.** `main`, 85 tests / 207
+**Phase 0 and Phase 1 are built and green.** `main`, 90 tests / 222
 checks / 0 skipped. Repo: <https://github.com/MaXiMo000/firedrill> (public).
 CI runs on every push: Linux/Windows × Python 3.10/3.13, plus image, package
 and dogfood jobs.
@@ -76,7 +76,7 @@ firedrill/
   cli.py       run / clean
 tests/
   make_corpus.py      builds the broken-backup fixtures from real containers
-  test_firedrill.py   85 tests; --require-integration makes a skip a failure
+  test_firedrill.py   90 tests; --require-integration makes a skip a failure
   headers/            512-byte committed headers so the parser is testable
                       on a runner that cannot run Linux containers
 ```
@@ -151,17 +151,16 @@ a guard, not as a dependency on that measurement holding.
 **Phase 1 is complete.** Every PLAN.md §8 fixture is built and every check is
 asserted in both directions against a real broken backup. What is left:
 
-1. **The README does not document the config file.** It stops at Phase 0 — no
-   `firedrill.yml`, no ladder, no `--write-reference`. This is the gap between
-   what the tool does and what a stranger can tell it does.
-2. **PLAN.md §9 Phase 2** — S3/GCS sources, checksum verification, and the
-   `fast`/`sample` tiers that `config.py` currently refuses by name.
-3. Smaller, when convenient:
-   - `report.archive["restored_into_major"]` is the *intended* major, read
-     from the dump header, not read back from the running server. The image
-     tag makes it true in practice, but nothing asserts the server agrees.
-   - `volume.tolerance` is refused until Phase 3's `history.json` gives it a
-     baseline to compare against. The refusal message says so.
+**PLAN.md §9 Phase 2 is next** — S3/GCS sources, checksum verification, and
+the `fast`/`sample` tiers that `config.py` currently refuses by name. Nothing
+from Phase 1 is outstanding.
+
+Two things deliberately deferred, both with the refusal already written so
+neither can be mistaken for working:
+
+- `volume.tolerance` is refused by name until Phase 3's `history.json` gives
+  it a baseline to compare against. The message says exactly that.
+- `target.type: dsn` is refused until §7's four interlocks exist.
 
 ### Two things that turned out easier than this file previously claimed
 
