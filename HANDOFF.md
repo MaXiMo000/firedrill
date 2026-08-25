@@ -59,7 +59,7 @@ not a feature, they are the price of admission.
 
 ## Status
 
-**Phase 0 and Phase 1 are built and green.** `main`, 90 tests / 222
+**Phases 0, 1 and 2 are built and green.** `main`, 103 tests / 290
 checks / 0 skipped. Repo: <https://github.com/MaXiMo000/firedrill> (public).
 CI runs on every push: Linux/Windows × Python 3.10/3.13, plus image, package
 and dogfood jobs.
@@ -70,13 +70,14 @@ firedrill/
   docker.py    ephemeral version-matched container, teardown in a finally
   restore.py   pg_restore inside the container + stderr classifier
   config.py    firedrill.yml -> typed settings, refuses ambiguity   [phase 1]
+  sources.py   local / https / s3, read-only by construction        [phase 2]
   ladder.py    structure / volume / semantics / integrity           [phase 1]
   drill.py     inspect -> target -> restore -> smoke -> ladder, each timed
   report.py    human table + --json
   cli.py       run / clean
 tests/
   make_corpus.py      builds the broken-backup fixtures from real containers
-  test_firedrill.py   90 tests; --require-integration makes a skip a failure
+  test_firedrill.py   103 tests; --require-integration makes a skip a failure
   headers/            512-byte committed headers so the parser is testable
                       on a runner that cannot run Linux containers
 ```
@@ -151,16 +152,38 @@ a guard, not as a dependency on that measurement holding.
 **Phase 1 is complete.** Every PLAN.md §8 fixture is built and every check is
 asserted in both directions against a real broken backup. What is left:
 
-**PLAN.md §9 Phase 2 is next** — S3/GCS sources, checksum verification, and
-the `fast`/`sample` tiers that `config.py` currently refuses by name. Nothing
-from Phase 1 is outstanding.
+**Phases 0, 1 and 2 are done. PLAN.md §9 Phase 3 is next** — the CI surface:
+a GitHub Action, JUnit output, `history.json` trends, and a PR comment that
+says *"restored in 4m12s, 0 findings"*.
 
-Two things deliberately deferred, both with the refusal already written so
-neither can be mistaken for working:
+Phase 2 shipped `local` / `https` / `s3` sources with checksum-and-size
+verification, and all three tiers. Verified against MinIO — a real S3 server
+over a real socket, credentials from the environment — which proves the
+protocol path but **not** AWS IAM specifics; the test file says so rather
+than letting the two be confused.
 
-- `volume.tolerance` is refused by name until Phase 3's `history.json` gives
-  it a baseline to compare against. The message says exactly that.
-- `target.type: dsn` is refused until §7's four interlocks exist.
+Deferred, each with its refusal already written so none can be mistaken for
+working:
+
+- `volume.tolerance` — needs a baseline; arrives with Phase 3's
+  `history.json`. That baseline is also the natural home for the
+  last-known-good row counts §2 rung 4 wants.
+- `target.type: dsn` — until §7's four interlocks exist.
+- `source.type: gcs` — refused, pointing at `type: https` with a signed URL,
+  which works today and is verified. GCS's S3-compatible XML API may also
+  work through `type: s3` with `endpoint_url`, but that is **untested**, so it
+  is not claimed anywhere in the docs.
+
+### Two measurements from Phase 2 worth not rediscovering
+
+- `pg_restore --data-only -t customer` restores every row and leaves the
+  sequence at **1**: setval is not part of a table-scoped data restore. That
+  is why the sample tier does not check sequences — it would report
+  SEQUENCE_BEHIND on a healthy backup.
+- `[project.optional-dependencies]` must sit **after** the bare `urls.*` keys
+  in `pyproject.toml`. Opening it above them reparents them and breaks the
+  build, while the whole suite still passes — the suite imports the source
+  tree and never builds it. A test pins the ordering.
 
 ### Two things that turned out easier than this file previously claimed
 
