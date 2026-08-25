@@ -77,8 +77,28 @@ def _fetch_local(source, workdir: pathlib.Path) -> Artifact:
     path = pathlib.Path(source.path).expanduser()
     if not path.exists():
         raise SourceError(f"no such file: {path}")
+
     if path.is_dir():
-        raise SourceError(f"{path} is a directory; firedrill reads a single archive")
+        # A directory-format dump (`pg_dump -Fd`) is a real archive, and the
+        # shape large databases are dumped in because it restores in parallel.
+        if not (path / "toc.dat").exists():
+            raise SourceError(
+                f"{path} is a directory with no toc.dat in it, so it is not a "
+                "directory-format dump. Point at the dump directory itself, or "
+                "at a single -Fc/-Ft archive."
+            )
+        if source.sha256:
+            # A tree has no single checksum without inventing a canonical form
+            # for it. Refused rather than quietly ignored, which would leave the
+            # config claiming a verification that never happened.
+            raise SourceError(
+                "source.sha256 cannot be checked against a directory dump: a "
+                "directory has no single digest. Use `size`, or dump to a "
+                "single-file format if you want a checksum."
+            )
+        total = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+        return Artifact(path=path, size=total, sha256="", origin=str(path))
+
     # Not copied. Reading it in place cannot modify it, and copying a 2 TB
     # backup to check it is restorable is its own outage.
     return Artifact(path=path, size=path.stat().st_size, sha256="", origin=str(path))

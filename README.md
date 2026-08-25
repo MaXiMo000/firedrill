@@ -121,6 +121,24 @@ Three properties worth stating plainly:
   every report, log line and finding, and plain `http` to a non-local host is
   refused outright rather than putting a working one on the wire.
 
+## Which dump formats
+
+| format | flag | supported |
+|---|---|---|
+| custom | `-Fc` | yes |
+| directory | `-Fd` | yes — the one that restores in parallel, so the one large databases use |
+| tar | `-Ft` | yes |
+| plain SQL | `-Fp` | **no**, and it cannot be |
+
+Custom, directory and tar all carry a `PGDMP` header — directory and tar keep
+theirs in a `toc.dat` member — so the major version is read out of the artefact
+itself, with no PostgreSQL client on the host. That is what makes the
+version-matching real.
+
+Plain SQL has no header. Nothing in a `.sql` file states which server produced
+it in a form worth trusting, so firedrill cannot pick a matching container and
+says so rather than guessing at one.
+
 ## Which PostgreSQL versions
 
 Tested end to end against **13, 14, 15, 16, 17 and 18** — dump on any of them,

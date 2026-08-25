@@ -87,11 +87,16 @@ class Source:
         return sh("docker", "exec", "-u", "postgres", self.name,
                   "psql", "-U", "postgres", "-d", db, "-v", "ON_ERROR_STOP=1", "-c", sql)
 
-    def dump(self, dest: pathlib.Path, db: str = "postgres", plain: bool = False):
-        fmt = "-Fp" if plain else "-Fc"
+    def dump(self, dest: pathlib.Path, db: str = "postgres", plain: bool = False,
+             fmt: str = ""):
+        """`fmt` is a pg_dump format flag: -Fc (default), -Fd, -Ft, -Fp."""
+        fmt = fmt or ("-Fp" if plain else "-Fc")
         inside = "/tmp/out.dump"
+        sh("docker", "exec", "-u", "postgres", self.name, "rm", "-rf", inside)
         sh("docker", "exec", "-u", "postgres", self.name,
            "pg_dump", "-U", "postgres", fmt, "-f", inside, db)
+        if dest.exists() and dest.is_dir():
+            shutil.rmtree(dest)
         sh("docker", "cp", f"{self.name}:{inside}", str(dest))
         return dest
 
@@ -268,6 +273,15 @@ def build(outdir: pathlib.Path = DEFAULT_OUT) -> dict:
                 src.psql(statement)
             healthy = src.dump(outdir / f"healthy_pg{major}.dump")
             made[f"healthy_pg{major}"] = healthy
+
+            if major == VERSIONS[0]:
+                # The same healthy database in the other two formats pg_restore
+                # can read. Taken HERE, before missing_role adds a second table
+                # to this same database -- the first attempt put them after it,
+                # and "healthy_tar" quietly contained two tables and a missing
+                # role. A fixture named healthy has to be healthy.
+                made["healthy_dir"] = src.dump(outdir / "healthy_dir", fmt="-Fd")
+                made["healthy_tar"] = src.dump(outdir / "healthy.tar", fmt="-Ft")
 
             # A committed 512-byte header, so the pure-Python parser can be
             # tested on a machine that cannot run Linux containers at all.

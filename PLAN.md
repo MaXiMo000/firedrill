@@ -145,7 +145,7 @@ firedrill/
     __init__.py      registry; each source yields a local artefact + metadata
     local.py         a path on disk
     s3.py            boto3, or plain HTTP for presigned URLs
-    pgdump.py        understands custom/dir/tar/plain formats
+    pgdump.py        custom/dir/tar (plain has no header; see the README)
     basebackup.py    pg_basebackup layouts, for PITR later
   targets/
     docker.py        ephemeral container, version-matched  (default)

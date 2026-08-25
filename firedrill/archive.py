@@ -37,6 +37,7 @@ from __future__ import annotations
 import dataclasses
 import pathlib
 import re
+import tarfile
 
 MAGIC = b"PGDMP"
 
@@ -45,6 +46,10 @@ FORMAT_TAR = 3
 FORMAT_DIRECTORY = 5
 
 _FORMAT_NAMES = {1: "custom", 3: "tar", 5: "directory"}
+
+# Everything pg_restore can read. A directory dump's toc.dat reports
+# format 3 (tar), which is why both share one code here.
+RESTORABLE_FORMATS = (FORMAT_CUSTOM, FORMAT_TAR, FORMAT_DIRECTORY)
 
 # From this archive version the compression field is a single raw byte rather
 # than an Int. Verified: PG 14 -> 1.14 (Int), PG 16 -> 1.15 (byte),
@@ -191,16 +196,48 @@ def parse_header(data: bytes) -> ArchiveHeader:
 HEADER_BYTES = 512
 
 
+# Directory (-Fd) and tar (-Ft) dumps both keep their table of contents in a
+# member called toc.dat, and that file begins with the same PGDMP header as a
+# custom archive. So the version can be read out of all three without a
+# PostgreSQL client, which is what the version-matching depends on.
+TOC = "toc.dat"
+
+
 def read_header(path: str | pathlib.Path) -> ArchiveHeader:
+    """The header, from a custom archive, a directory dump, or a tar dump."""
     path = pathlib.Path(path)
     if not path.exists():
         raise ArchiveError(f"no such file: {path}")
+
     if path.is_dir():
-        raise ArchiveError(
-            f"{path} is a directory. Directory-format dumps arrive in a later phase; "
-            "Phase 0 handles custom format (-Fc) only."
-        )
+        toc = path / TOC
+        if not toc.exists():
+            raise ArchiveError(
+                f"{path} is a directory with no {TOC} in it, so it is not a "
+                "directory-format dump. `pg_dump -Fd -f <dir>` produces one."
+            )
+        with toc.open("rb") as handle:
+            return parse_header(handle.read(HEADER_BYTES))
+
     if path.stat().st_size == 0:
         raise ArchiveError(f"{path} is empty (0 bytes)")
+
     with path.open("rb") as handle:
-        return parse_header(handle.read(HEADER_BYTES))
+        head = handle.read(HEADER_BYTES)
+
+    # A tar archive announces itself 257 bytes in, not at the start, so this is
+    # checked only after the PGDMP magic has failed to match.
+    if not head.startswith(MAGIC) and tarfile.is_tarfile(path):
+        try:
+            with tarfile.open(path) as tar:
+                member = tar.extractfile(TOC)
+                if member is None:
+                    raise KeyError(TOC)
+                return parse_header(member.read(HEADER_BYTES))
+        except (KeyError, tarfile.TarError) as exc:
+            raise ArchiveError(
+                f"{path} is a tar file with no readable {TOC}, so it is not a "
+                f"tar-format dump ({exc})."
+            ) from None
+
+    return parse_header(head)

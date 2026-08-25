@@ -2114,6 +2114,71 @@ def test_integration_a_reference_survives_a_major_upgrade():
         check("a 14 reference is clean against a 16 restore", structural, [])
 
 
+def test_integration_every_restorable_format_works():
+    """PLAN.md §5 asks for custom, directory and tar. All three carry a PGDMP
+    header -- directory and tar keep theirs in a toc.dat member -- so the major
+    version can be read out of each without a PostgreSQL client, which is what
+    the version-matching depends on.
+
+    Directory format matters most: it is what large databases are dumped in,
+    because it is the one pg_restore can parallelise.
+    """
+    needs_docker()
+    results = {}
+    for name in ("healthy_pg16.dump", "healthy_dir", "healthy.tar"):
+        report = drill.run(corpus(name))
+        results[name] = report
+        check(f"{name} restores", report.exit_code, 0)
+        check(f"{name} is verified", report.verified, True)
+        check(f"{name} found the table", report.stage("smoke").detail,
+              "1 user table(s)")
+        check(f"{name} matched the major",
+              report.archive["restored_into_major"], "16")
+
+    check("and they are not silently the same file",
+          len({str(corpus(n)) for n in results}), 3)
+
+
+def test_integration_a_directory_must_actually_be_a_dump():
+    """An arbitrary directory is not a directory-format dump, and saying so is
+    better than a confusing pg_restore error later."""
+    needs_docker()
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        (pathlib.Path(tmp) / "notes.txt").write_text("nothing to see", encoding="utf-8")
+        report = drill.run(pathlib.Path(tmp))
+        check("rule", [f.rule for f in report.findings], ["FETCH_FAILED"])
+        check("says what is missing", "toc.dat" in report.findings[0].message, True)
+        check("nothing was started", report.stage("target").status, drill.NOT_RUN)
+
+
+def test_integration_plain_sql_is_still_refused_with_a_reason():
+    """Plain SQL has no header, so the major version cannot be read out of it
+    -- and version-matching is the thing this tool is built on."""
+    needs_docker()
+    report = drill.run(corpus("not_an_archive.sql"))
+    check("rule", [f.rule for f in report.findings], ["ARCHIVE_UNREADABLE"])
+    check("no container was started", report.stage("target").status, drill.NOT_RUN)
+
+
+def test_directory_dump_refuses_a_checksum_it_cannot_compute():
+    """A tree has no single digest without inventing a canonical form for it.
+    Refused rather than ignored, which would leave the config claiming a
+    verification that never happened."""
+    from firedrill import sources
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = pathlib.Path(tmp) / "dump"
+        directory.mkdir()
+        (directory / "toc.dat").write_bytes(b"PGDMP")
+        source = config.Source(type="local", path=str(directory), sha256="a" * 64)
+        try:
+            sources.fetch(source, pathlib.Path(tmp))
+            FAILURES.append("  a directory with a sha256 should have been refused")
+        except sources.SourceError as exc:
+            check("explains why", "no single digest" in str(exc), True)
+
+
 def test_integration_leaves_no_containers_behind():
     needs_docker()
     before = set(docker.orphans())
@@ -2195,7 +2260,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 131
+    FLOOR = 135
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "

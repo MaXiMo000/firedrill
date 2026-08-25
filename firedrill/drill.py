@@ -397,7 +397,11 @@ def _run(dump_path: str | pathlib.Path | None = None, *, flavour: str = "",
         report.total_seconds = time.monotonic() - began
         return report
 
-    if header.format != archive.FORMAT_CUSTOM:
+    # custom (-Fc), directory (-Fd) and tar (-Ft) all carry a PGDMP header and
+    # are all restorable by pg_restore. Plain SQL is not: it has no header, so
+    # the major version cannot be read out of it, and version-matching is the
+    # thing this tool is built on.
+    if header.format not in archive.RESTORABLE_FORMATS:
         stage("inspect").status = FAILED
         stage("inspect").seconds = time.monotonic() - started
         report.findings.append(Finding(
