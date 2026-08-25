@@ -456,6 +456,14 @@ def integrity(container, cfg, database: str,
       that this tool performs -- the check would cost a full scan per
       constraint to confirm something pg_restore already refused to let
       through. It arrives if and when a restore mode that can produce one does.
+    * amcheck. PLAN.md §2 lists it and it is not here, which is worth saying
+      out loud rather than leaving as an absence. `bt_index_check` verifies
+      B-tree structure, and the honest obstacle is verification: proving the
+      check FIRES needs a genuinely corrupt index, which means manufacturing
+      one by flipping bytes in a data file or by rebuilding under a changed
+      collation. Until that fixture exists, shipping it would mean a check
+      nobody has ever watched fail -- the same reason collation waited for a
+      musl target rather than going out on reasoning alone.
     Collation now lives in collation() above and is called from here, so the
     caller still gets one integrity rung.
     """

@@ -49,8 +49,10 @@ reports as unverified rather than passing.
    at least one order from the last 7 days"* catches a stale-replica dump that
    every structural check passes.
 6. **Integrity** — the checks that only a restore can make: sequence values
-   ahead of `max(id)`, no orphaned foreign keys, collation version match,
-   `amcheck` on critical indexes if available.
+   ahead of `max(id)`, collation version match. *(Orphaned foreign keys and
+   `amcheck` are deliberately not built — see `ladder.integrity`'s docstring
+   for why each is absent. Neither is waiting on effort; both are waiting on a
+   fixture that could prove them capable of failing.)*
 7. **Time** — how long every stage took, against a stated RTO budget.
 
 Output: one report, a machine-readable JSON, and a non-zero exit when a rung
@@ -154,7 +156,7 @@ firedrill/
     structure.py     catalog diff against a reference snapshot
     volume.py        row counts vs tolerance or last known good
     semantics.py     user smoke queries
-    integrity.py     sequences, orphaned FKs, collation, amcheck
+    integrity.py     sequences and collation (FKs/amcheck: see the docstring)
   report/
     human.py         the default table
     json.py          machine-readable, for trend storage
