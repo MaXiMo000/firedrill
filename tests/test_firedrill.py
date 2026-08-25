@@ -600,6 +600,22 @@ semantics:
 """, "ambiguous")
 
 
+def test_readme_yaml_examples_actually_load():
+    """Config documentation that does not parse is worse than none: it costs a
+    reader their time and their trust. Every ```yaml block in the README is
+    fed to the real loader, so the docs cannot drift away from the parser."""
+    import re
+    readme = (HERE.parent / "README.md").read_text(encoding="utf-8")
+    blocks = re.findall(r"```yaml\n(.*?)```", readme, re.S)
+    check("the README documents at least one config", len(blocks) >= 1, True)
+    for index, block in enumerate(blocks):
+        try:
+            config.loads(block)
+            CHECKS[0] += 1
+        except config.ConfigError as exc:
+            FAILURES.append(f"  README yaml block {index} does not load\n    {exc}")
+
+
 def test_config_defaults_when_there_is_no_file():
     cfg = config.DEFAULT
     check("tier", cfg.tier, "full")
@@ -1084,7 +1100,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 84
+    FLOOR = 85
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "

@@ -17,9 +17,10 @@ confidence.
 
 ## Status
 
-**Phase 0.** One local `pg_dump` custom-format file, restored into an ephemeral
-container, honestly reported. The checks that compare schema, row counts and
-business-level smoke queries are Phase 1 — see `PLAN.md`.
+**Phases 0 and 1.** A local `pg_dump` custom-format file, restored into an
+ephemeral version-matched container, then put through the ladder: structure,
+volume, semantics and integrity. S3/GCS sources and the `fast`/`sample` tiers
+are Phase 2 — see `PLAN.md`.
 
 What works today:
 
@@ -82,6 +83,59 @@ firedrill clean                            # remove containers left by a crash
 Exit code is `0` only when the restore genuinely ran and produced no finding at
 or above `--fail-on` (default `high`).
 
+## The ladder, and `firedrill.yml`
+
+A bare `firedrill run` proves the backup restores and answers queries. To prove
+it restored *the right data*, put a `firedrill.yml` next to it — it is picked up
+automatically, or named with `--config`.
+
+```yaml
+version: 1
+
+rto_budget: 45m
+
+structure:
+  reference: schema/production.txt   # committed, reviewable, diffable
+
+volume:
+  tables:
+    orders: {min_rows: 1}
+
+semantics:
+  - name: recent orders exist
+    sql: SELECT count(*) FROM orders WHERE created_at > now() - interval '7 days'
+    expect: "> 0"
+
+ignore:
+  - check: COLLATION_UNVERIFIABLE
+    reason: "restoring on alpine in CI; tracked in DR-114"
+```
+
+Generate the structure reference once and commit it:
+
+```bash
+firedrill run dump.dump --write-reference schema/production.txt
+```
+
+It is one line per catalog object, sorted, so a schema change shows up as a
+readable diff in review rather than a wall of `pg_dump` output.
+
+Three things the loader does that are worth knowing, because each one is a
+failure it refuses to let pass quietly:
+
+- **An unknown key is an error, not a warning.** A typo'd `tolerence:` that
+  loaded silently would mean a check you believe is running is not running,
+  and the run would still go green.
+- **Every `ignore` needs a written reason.** An unexplained suppression is a
+  config error. It is the only process this tool imposes, and it is what keeps
+  a green run meaningful.
+- **`expect` must be a comparison against a number.** There is deliberately no
+  way to write a check whose result is printed, so a smoke query returns a
+  shape and never a row.
+
+Rungs that nothing configured report `n/a` — *not configured* — rather than a
+tick. "Nothing asked for this" and "this passed" are different facts.
+
 ## What it checks today
 
 | Rule | Meaning |
@@ -96,6 +150,20 @@ or above `--fail-on` (default `high`).
 | `EMPTY_RESTORE` | restored cleanly and contains no user tables |
 | `TARGET_UNAVAILABLE` | the restore could not be attempted |
 | `RTO_EXCEEDED` | slower than the stated budget |
+| `STRUCTURE_MISSING` | an object in the committed reference did not come back |
+| `STRUCTURE_UNEXPECTED` | the database has drifted from the reference |
+| `VOLUME_BELOW_MINIMUM` | a table restored with fewer rows than the config requires |
+| `VOLUME_TABLE_MISSING` | the config expects a table the restore does not have |
+| `SEMANTICS_FAILED` | a smoke query restored cleanly and answered the wrong thing |
+| `SEQUENCE_BEHIND` | a sequence is below `max(id)`; the first insert will collide |
+| `COLLATION_MISMATCH` | the target's libc differs from the reference's — text indexes sort differently |
+| `COLLATION_UNVERIFIABLE` | the target reports no collation version, so sort order cannot be checked at all |
+
+Each of these is proved against a deliberately broken backup that `pg_restore`
+itself is perfectly happy with — that is the point of the whole ladder — and
+each is also asserted *not* to fire on a healthy one. A false positive costs
+exactly what a false negative costs: a DR tool that cries wolf gets muted, and
+a muted DR tool is worse than none because it still looks like coverage.
 
 ## A correction to the plan
 
