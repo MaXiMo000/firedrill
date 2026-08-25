@@ -1876,6 +1876,133 @@ def test_integration_a_database_whose_sequences_cannot_be_linked_says_so():
           "1 sequence(s) and none could be linked" in report.findings[0].message, True)
 
 
+RICH_SCHEMA = (
+    "create table t(id serial primary key, v text);",
+    "create view t_view as select id from t;",
+    "create function bump() returns trigger language plpgsql as "
+    "$$ begin return new; end $$;",
+    "create trigger t_bump before insert on t for each row execute function bump();",
+    "create type mood as enum ('ok','bad');",
+    "alter table t enable row level security;",
+    "create policy t_pol on t using (true);",
+)
+
+
+def _rich_dumps(tmp, extra: dict):
+    """A database with every object kind, plus one variant per mutation."""
+    import make_corpus
+    made = {}
+    with make_corpus.Source(make_corpus.VERSIONS[0]) as src:
+        for db in ("rich", *extra):
+            src.psql(f"create database {db};")
+            for statement in RICH_SCHEMA:
+                src.psql(statement, db=db)
+        for db, mutation in extra.items():
+            src.psql(mutation, db=db)
+        for db in ("rich", *extra):
+            made[db] = src.dump(pathlib.Path(tmp) / f"{db}.dump", db=db)
+    return made
+
+
+def test_integration_structure_covers_more_than_tables():
+    """Measured gap: a database that lost its view, function, trigger, RLS
+    policy and enum type restored with a green structure rung and exit 0,
+    because the snapshot only knew tables, indexes, constraints, sequences and
+    extensions.
+
+    The policy line matters most. A restore that drops an RLS policy produces
+    a database that answers every query with rows it must never return, and
+    nothing errors.
+    """
+    needs_docker()
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        dumps = _rich_dumps(tmp, {
+            "stripped": "drop trigger t_bump on t; drop function bump(); "
+                        "drop view t_view; drop policy t_pol on t; drop type mood;",
+        })
+        ref = pathlib.Path(tmp) / "ref.txt"
+        drill.run(dumps["rich"], write_reference=ref)
+
+        kinds = {line.split("|", 1)[0] for line in ref.read_text(encoding="utf-8").splitlines()}
+        for kind in ("view", "routine", "trigger", "policy", "rowsecurity", "type"):
+            check(f"the reference captures {kind}", kind in kinds, True)
+
+        cfg = config.loads(f"version: 1\nstructure:\n  reference: {ref}\n")
+        clean = drill.run(dumps["rich"], cfg=cfg)
+        check("an identical database is silent", [f.rule for f in clean.findings], [])
+
+        lost = drill.run(dumps["stripped"], cfg=cfg)
+        check("losing them is caught", [f.rule for f in lost.findings],
+              ["STRUCTURE_MISSING"])
+        evidence = lost.findings[0].evidence
+        for kind in ("view", "routine", "trigger", "policy", "type"):
+            check(f"and {kind} is named in the evidence", kind in evidence, True)
+
+
+def test_integration_row_security_switched_off_is_caught():
+    """The subtle half: every policy still present, and row security disabled.
+    The table is then wide open and the catalog otherwise looks identical."""
+    needs_docker()
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        dumps = _rich_dumps(tmp, {
+            "rls_off": "alter table t disable row level security;",
+        })
+        ref = pathlib.Path(tmp) / "ref.txt"
+        drill.run(dumps["rich"], write_reference=ref)
+        cfg = config.loads(f"version: 1\nstructure:\n  reference: {ref}\n")
+
+        report = drill.run(dumps["rls_off"], cfg=cfg)
+        check("caught", [f.rule for f in report.findings], ["STRUCTURE_MISSING"])
+        check("naming row security specifically",
+              "rowsecurity" in report.findings[0].evidence, True)
+        check("non-zero", report.exit_code, 1)
+
+
+def test_pitr_target_cannot_inject_postgres_settings():
+    """The recovery target lands in postgresql.conf inside the container.
+
+    A single quote in it closes the SQL string and everything after is read as
+    further settings -- `archive_command` among them, which is command
+    execution inside the container. The heredoc that writes the file is quoted
+    so the shell never expands anything; Postgres's own config parser is the
+    surface. Measured before the fix: `archive_command = 'touch /tmp/pwned'`
+    appeared in the generated conf.
+    """
+    from firedrill import pitr as pitr_module
+    evil = "2026-01-01 00:00:00'\narchive_command = 'touch /tmp/pwned"
+    try:
+        pitr_module.check_target(evil)
+        FAILURES.append("  an injecting target should have been refused")
+    except pitr_module.InvalidTarget as exc:
+        check("says it wants a timestamp", "is not a timestamp" in str(exc), True)
+
+    for bad in ("now()", "", "2026-08-25", "'; drop database postgres; --",
+                "2026-08-25 12:30:16' -- x"):
+        try:
+            pitr_module.check_target(bad)
+            FAILURES.append(f"  {bad!r} should have been refused")
+        except pitr_module.InvalidTarget:
+            CHECKS[0] += 1
+
+    # The other direction: every shape Postgres legitimately accepts.
+    for good in ("2026-08-25 12:30:16", "2026-08-25T12:30:16",
+                 "2026-08-25 12:30:16.178510", "2026-08-25 12:30:16+00",
+                 "2026-08-25 12:30:16.5+05:30", "2026-08-25T12:30:16Z"):
+        check(f"{good!r} is accepted", pitr_module.check_target(good), good)
+
+
+def test_pitr_refuses_an_injecting_target_before_starting_anything():
+    """Reported as a finding, with no container started: nothing to clean up
+    and nothing to have executed."""
+    report = drill.run_pitr("/nonexistent/base", "/nonexistent/wal",
+                            "2026-01-01 00:00:00'\narchive_command = 'x")
+    check("rule", [f.rule for f in report.findings], ["PITR_TARGET_INVALID"])
+    check("not verified", report.verified, False)
+    check("recovery never ran", report.stage("recover").status, drill.NOT_RUN)
+
+
 def test_integration_leaves_no_containers_behind():
     needs_docker()
     before = set(docker.orphans())
@@ -1957,7 +2084,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 123
+    FLOOR = 127
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "

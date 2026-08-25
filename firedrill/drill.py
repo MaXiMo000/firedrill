@@ -153,6 +153,22 @@ def run_pitr(base, wal, target: str, *, cfg=None, flavour: str = "",
     def stage(name):
         return next(s for s in stages if s.name == name)
 
+    # Validated first, before the filesystem is touched or Docker is probed.
+    # It is the cheapest check and the one that guards an injection surface;
+    # doing it after reading the base meant a bad path masked a bad target.
+    try:
+        target = pitr.check_target(target)
+    except pitr.InvalidTarget as exc:
+        report.findings.append(Finding(
+            stage="recover", rule="PITR_TARGET_INVALID", severity="critical",
+            message=str(exc),
+            fix="Pass the moment you want to recover to, as a timestamp. "
+                "Nothing was started.",
+            evidence="",
+        ))
+        report.total_seconds = time.monotonic() - began
+        return _suppress(report, cfg)
+
     usable, why = docker.docker_available()
     if not usable:
         stage("recover").detail = why

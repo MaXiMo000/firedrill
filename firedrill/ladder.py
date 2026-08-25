@@ -82,6 +82,72 @@ where c.relkind = 'S' and n.nspname !~ '^pg_' and n.nspname <> 'information_sche
 union all
 select 'extension', extname, '' from pg_extension
 union all
+-- Everything below was measured as missing: a database that lost its view,
+-- function, trigger, RLS policy and enum type restored with a green structure
+-- rung and exit 0, because the snapshot only knew about tables, indexes,
+-- constraints, sequences and extensions.
+--
+-- The policy line is the one that matters most. A restore that drops an RLS
+-- policy, or brings the table back with row security disabled, produces a
+-- database that answers every query with rows it should never return -- and
+-- nothing errors.
+select 'view', n.nspname||'.'||c.relname,
+       case c.relkind when 'm' then 'materialized' else 'view' end
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+where c.relkind in ('v', 'm')
+  and n.nspname !~ '^pg_' and n.nspname <> 'information_schema'
+union all
+-- Identity arguments, so an overload that vanished is not hidden by a
+-- namesake that survived.
+select 'routine', n.nspname||'.'||p.proname
+         ||'('||pg_get_function_identity_arguments(p.oid)||')',
+       p.prokind::text
+from pg_proc p
+join pg_namespace n on n.oid = p.pronamespace
+where n.nspname !~ '^pg_' and n.nspname <> 'information_schema'
+  -- Objects owned by an extension are already represented by its version
+  -- line; listing them makes the reference churn on every extension upgrade.
+  and not exists (select 1 from pg_depend d
+                  where d.objid = p.oid and d.deptype = 'e')
+union all
+select 'trigger', n.nspname||'.'||c.relname||'.'||t.tgname, ''
+from pg_trigger t
+join pg_class c on c.oid = t.tgrelid
+join pg_namespace n on n.oid = c.relnamespace
+where not t.tgisinternal
+  and n.nspname !~ '^pg_' and n.nspname <> 'information_schema'
+union all
+select 'policy', n.nspname||'.'||c.relname||'.'||pol.polname,
+       pol.polcmd::text || case when pol.polpermissive then ' permissive'
+                                else ' restrictive' end
+from pg_policy pol
+join pg_class c on c.oid = pol.polrelid
+join pg_namespace n on n.oid = c.relnamespace
+where n.nspname !~ '^pg_' and n.nspname <> 'information_schema'
+union all
+-- Whether row security is ON, separately from whether policies exist. A table
+-- can come back with all its policies and RLS disabled, which is wide open.
+select 'rowsecurity', n.nspname||'.'||c.relname,
+       case when c.relrowsecurity then 'enabled' else 'disabled' end
+         || case when c.relforcerowsecurity then ' forced' else '' end
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+where c.relkind in ('r', 'p') and c.relrowsecurity
+  and n.nspname !~ '^pg_' and n.nspname <> 'information_schema'
+union all
+select 'type', n.nspname||'.'||t.typname, t.typtype::text
+from pg_type t
+join pg_namespace n on n.oid = t.typnamespace
+where n.nspname !~ '^pg_' and n.nspname <> 'information_schema'
+  -- Enums and domains, plus standalone composites. Every table also creates a
+  -- composite type; those are excluded, since the table is already listed.
+  and (t.typtype in ('e', 'd')
+       or (t.typtype = 'c' and exists (select 1 from pg_class c
+                                       where c.oid = t.typrelid and c.relkind = 'c')))
+  and not exists (select 1 from pg_depend d
+                  where d.objid = t.oid and d.deptype = 'e')
+union all
 -- Carried in the reference so a later restore can be compared against the
 -- libc that produced it. Excluded from the structure diff (see structure())
 -- and read by collation() instead, because a sort-order change deserves its

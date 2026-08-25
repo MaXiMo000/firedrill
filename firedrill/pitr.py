@@ -42,6 +42,39 @@ from .finding import Finding
 # 14:01" and "recovered to whenever the archive happened to end".
 _TARGET_UNREACHED = "recovery ended before configured recovery target was reached"
 
+# A recovery target is a timestamp. It is interpolated into postgresql.conf
+# inside the container, and a single quote in it closes the SQL string and
+# lets the rest be read as further settings -- `archive_command` among them,
+# which is command execution inside the container.
+#
+# The heredoc that writes the file is quoted (<<'FIREDRILL'), so the shell
+# never expands anything; it is Postgres's own config parser that is the
+# injection surface. Constrained rather than escaped: a timestamp has one
+# shape, and anything else is a mistake worth naming.
+_TIMESTAMP = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d{1,6})?"
+    r"( ?[+-]\d{2}(:?\d{2})?|Z)?$"
+)
+
+
+class InvalidTarget(ValueError):
+    """The recovery target is not a timestamp."""
+
+
+def check_target(target: str) -> str:
+    """The target, or a refusal explaining why it is not one."""
+    text = (target or "").strip()
+    if not _TIMESTAMP.match(text):
+        raise InvalidTarget(
+            f"recovery target {target!r} is not a timestamp. Use "
+            "'YYYY-MM-DD HH:MM:SS', optionally with fractional seconds and an "
+            "offset. It is written into the server's configuration, so it is "
+            "constrained to the one shape it can legitimately have rather than "
+            "escaped and hoped over."
+        )
+    return text
+
+
 # Seeds PGDATA from the mounted base backup and hands over to the image's own
 # entrypoint, which then starts a server that recovers rather than initialises.
 _SEED = """
@@ -128,6 +161,16 @@ def recover(base, wal, target: str, *, flavour: str = "",
     different moment than the one under test.
     """
     base, wal = pathlib.Path(base), pathlib.Path(wal)
+    try:
+        target = check_target(target)
+    except InvalidTarget as exc:
+        return None, [Finding(
+            stage="recover", rule="PITR_TARGET_INVALID", severity="critical",
+            message=str(exc),
+            fix="Pass the moment you want to recover to, as a timestamp. "
+                "Nothing was started.",
+            evidence="",
+        )]
     major = major_of_base(base)
     container = RecoveryContainer(major, base, wal, target, flavour=flavour,
                                   ready_timeout=ready_timeout)
