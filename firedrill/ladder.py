@@ -81,8 +81,20 @@ join pg_namespace n on n.oid = c.relnamespace
 where c.relkind = 'S' and n.nspname !~ '^pg_' and n.nspname <> 'information_schema'
 union all
 select 'extension', extname, '' from pg_extension
+union all
+-- Carried in the reference so a later restore can be compared against the
+-- libc that produced it. Excluded from the structure diff (see structure())
+-- and read by collation() instead, because a sort-order change deserves its
+-- own message rather than being one line of generic drift.
+select 'collation', datcollate,
+       datlocprovider::text || ' ' || coalesce(datcollversion, '')
+from pg_database where datname = current_database()
 order by 1, 2
 """
+
+# Snapshot lines that structure() must not diff, because another rung owns
+# them and reports them with the explanation they need.
+_NOT_STRUCTURAL = ("collation|",)
 
 
 def snapshot(container, database: str) -> str:
@@ -129,8 +141,12 @@ def structure(container, cfg, database: str) -> tuple[list[Finding], dict]:
             evidence=str(exc),
         )], {}
 
-    want = {line for line in expected.splitlines() if line.strip()}
-    have = {line for line in actual.splitlines() if line.strip()}
+    def structural(text):
+        return {line for line in text.splitlines()
+                if line.strip() and not line.startswith(_NOT_STRUCTURAL)}
+
+    want = structural(expected)
+    have = structural(actual)
 
     findings: list[Finding] = []
     missing = sorted(want - have)
@@ -274,6 +290,86 @@ def semantics(container, cfg, database: str) -> tuple[list[Finding], dict]:
     return findings, {"results": results}
 
 
+# --------------------------------------------------------------- collation --
+
+def _collation_line(text: str) -> str:
+    for line in text.splitlines():
+        if line.startswith("collation|"):
+            return line.strip()
+    return ""
+
+
+def collation(container, cfg, database: str) -> tuple[list[Finding], dict]:
+    """PLAN.md §3.4, the silent one -- reported loudly because nothing else will.
+
+    Two distinct facts, measured on real containers rather than assumed:
+
+    * A musl target (`postgres:<n>-alpine`) reports an EMPTY collation
+      version. Not a different one -- none at all. Text indexes built there
+      have a sort order nothing can verify, so this reports "could not be
+      verified" rather than passing. That is the honest answer and it is
+      available without any reference at all.
+    * A restore into a different libc than the reference recorded is a real
+      mismatch. It needs a baseline, because a freshly restored database
+      always agrees with the target it was created on -- the corruption is
+      only visible against what production actually used.
+    """
+    findings: list[Finding] = []
+    probe = container.sql(
+        "select datcollate, datlocprovider, coalesce(datcollversion, '') "
+        "from pg_database where datname = current_database()",
+        database=database,
+    )
+    rows = _rows(probe)
+    if not rows or len(rows[0]) != 3:
+        return [Finding(
+            stage="integrity", rule="COLLATION_UNREADABLE", severity="medium",
+            message="could not read the restored database's collation settings",
+            fix="The collation comparison did not run, so the one failure mode "
+                "that produces wrong query results without any error has not "
+                "been checked here.",
+            evidence=(probe.stderr or "").strip(),
+        )], {}
+
+    collate, provider, version = rows[0]
+    info = {"collate": collate, "provider": provider, "version": version}
+
+    if not version:
+        findings.append(Finding(
+            stage="integrity", rule="COLLATION_UNVERIFIABLE", severity="medium",
+            message=f"the restore target reports no collation version for "
+                    f"{collate}, so sort order cannot be verified here",
+            fix="A musl target (the -alpine images) records no collation "
+                "version at all, so nothing -- not this tool, not PostgreSQL -- "
+                "can tell you whether text indexes sort the way production's "
+                "do. Restore into the default Debian image to get an answer "
+                "instead of a shrug.",
+            evidence="",
+        ))
+
+    reference = cfg.structure_reference
+    if reference is not None:
+        try:
+            recorded = _collation_line(reference.read_text(encoding="utf-8"))
+        except OSError:
+            recorded = ""  # structure() already reports an unreadable reference
+        current = f"collation|{collate}|{provider} {version}"
+        if recorded and recorded != current:
+            findings.append(Finding(
+                stage="integrity", rule="COLLATION_MISMATCH", severity="high",
+                message="the restore target's collation differs from the one the "
+                        "reference was taken on",
+                fix="Text indexes are built with this target's sort order. Where "
+                    "it differs from production's, queries can return WRONG ROWS "
+                    "against a database that looks perfectly healthy, and nothing "
+                    "raises an error. Restore on a matching libc before trusting "
+                    "any range or equality result over text.",
+                evidence=f"reference: {recorded}\nrestored:  {current}",
+            ))
+
+    return findings, info
+
+
 # --------------------------------------------------------------- integrity --
 
 # Sequence and its owning column, for every serial/identity column in the
@@ -292,7 +388,7 @@ where c.relkind = 'S' and n.nspname not in ('pg_catalog', 'information_schema')
 """
 
 
-def integrity(container, database: str) -> tuple[list[Finding], dict]:
+def integrity(container, cfg, database: str) -> tuple[list[Finding], dict]:
     """The checks only a restore can make.
 
     Currently: every sequence is at or ahead of the maximum value in the
@@ -305,10 +401,8 @@ def integrity(container, database: str) -> tuple[list[Finding], dict]:
       that this tool performs -- the check would cost a full scan per
       constraint to confirm something pg_restore already refused to let
       through. It arrives if and when a restore mode that can produce one does.
-    * Collation version mismatch. It needs a target whose libc differs from
-      the source's, which is a purpose-built image rather than a purpose-built
-      dump. Shipping it unverified would mean a flagship check nobody has ever
-      seen fire, which is the kind of confidence this project exists to refuse.
+    Collation now lives in collation() above and is called from here, so the
+    caller still gets one integrity rung.
     """
     findings: list[Finding] = []
     checked = 0
@@ -356,4 +450,7 @@ def integrity(container, database: str) -> tuple[list[Finding], dict]:
                 evidence="",
             ))
 
-    return findings, {"sequences": checked}
+    collation_findings, collation_info = collation(container, cfg, database)
+    findings.extend(collation_findings)
+
+    return findings, {"sequences": checked, **collation_info}

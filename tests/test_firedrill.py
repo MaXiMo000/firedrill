@@ -925,6 +925,54 @@ def test_integration_write_reference_does_not_also_compare():
         check("the detail says so", "wrote" in report.stage("structure").detail, True)
 
 
+def test_integration_collation_is_silent_on_a_matching_libc():
+    """PLAN.md §3.4 is the loudest check in the tool, which makes a false
+    positive here especially expensive. The default Debian target matches the
+    reference it wrote, so it must say nothing at all."""
+    needs_docker()
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        ref = _reference_for("healthy_pg16.dump", tmp)
+        check("the reference records a collation",
+              any(l.startswith("collation|") for l in ref.read_text().splitlines()),
+              True)
+        cfg = config.loads(f"version: 1\nstructure:\n  reference: {ref}\n")
+        report = drill.run(corpus("healthy_pg16.dump"), cfg=cfg)
+        check("nothing at all", [f.rule for f in report.findings], [])
+
+
+def test_integration_musl_target_is_caught_as_both_unverifiable_and_mismatched():
+    """Measured, not assumed: a musl target reports an EMPTY collation
+    version, not a different one. Restoring a glibc-referenced dump there is
+    the silent corruption of §3.4 -- text indexes sort differently, queries
+    return wrong rows, and nothing raises an error."""
+    needs_docker()
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        ref = _reference_for("healthy_pg16.dump", tmp)
+        cfg = config.loads(f"version: 1\nstructure:\n  reference: {ref}\n")
+        report = drill.run(corpus("healthy_pg16.dump"), cfg=cfg, flavour="-alpine")
+        rules = {f.rule for f in report.findings}
+        check("the target cannot answer the question",
+              "COLLATION_UNVERIFIABLE" in rules, True)
+        check("and it differs from the reference",
+              "COLLATION_MISMATCH" in rules, True)
+        check("non-zero exit", report.exit_code, 1)
+        check("the structure rung does not also report it as generic drift",
+              "STRUCTURE_UNEXPECTED" in rules or "STRUCTURE_MISSING" in rules, False)
+
+
+def test_integration_unverifiable_collation_needs_no_reference():
+    """The honest half of the check works with no baseline at all: a target
+    that cannot report a collation version cannot prove sort order either."""
+    needs_docker()
+    report = drill.run(corpus("healthy_pg16.dump"), flavour="-alpine")
+    rules = {f.rule for f in report.findings}
+    check("still reported", "COLLATION_UNVERIFIABLE" in rules, True)
+    check("but no mismatch is claimed without a baseline",
+          "COLLATION_MISMATCH" in rules, False)
+
+
 def test_integration_leaves_no_containers_behind():
     needs_docker()
     before = set(docker.orphans())
@@ -1006,7 +1054,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 79
+    FLOOR = 82
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "

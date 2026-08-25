@@ -311,7 +311,7 @@ def _run(dump_path: str | pathlib.Path, *, flavour: str = "",
         # This one needs no configuration: the questions it asks are the same
         # for every database, so it always runs.
         started = time.monotonic()
-        found, info = ladder.integrity(container, restore_stage.TARGET_DB)
+        found, info = ladder.integrity(container, cfg, restore_stage.TARGET_DB)
         report.findings.extend(found)
         stage("integrity").seconds = time.monotonic() - started
         stage("integrity").status = FAILED if found else OK
