@@ -17,6 +17,14 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.13"
+      # Install what pyproject declares, exactly as ci.yml does. This job was
+      # written in Phase 0, when the project was stdlib-only, and never ran
+      # until the first tag -- so it had never learned that PyYAML exists and
+      # failed the release with ModuleNotFoundError. A workflow nobody has
+      # executed is not a workflow that works.
+      - name: Install the package and its declared dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[s3]"
+
       - run: python tests/test_firedrill.py --require-integration
 
       # The tag and the packaged version must be the same thing. Without this a
