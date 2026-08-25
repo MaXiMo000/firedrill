@@ -84,6 +84,40 @@ firedrill clean                            # remove containers left by a crash
 Exit code is `0` only when the restore genuinely ran and produced no finding at
 or above `--fail-on` (default `high`).
 
+## Where the backup lives
+
+A path works, and so does the place the backup actually sits:
+
+```yaml
+version: 1
+source:
+  type: s3
+  bucket: acme-backups
+  prefix: postgres/daily/
+  select: newest          # or an explicit `key:`
+  sha256: "007168050a7570c6a9c93230992de425f81316bf688ceb277546e45265aae9d5"
+```
+
+`type: local` (a path), `type: https` (a presigned URL — S3, GCS and Azure all
+issue them), and `type: s3` (`pip install firedrill[s3]`). Give a `sha256:` or
+a `size:` and the artefact is checked against it **before** anything tries to
+restore it: a dump that arrives truncated but plausible never reaches a
+container, and the run reports rather than passes. Quote the digest — YAML
+reads a bare all-digit value as a number.
+
+Three properties worth stating plainly:
+
+- **Read-only by construction.** `sources.py` contains no verb that writes,
+  deletes, copies or tags anything at the origin. "Never writes to the source"
+  is a property of the file, not a promise in a README.
+- **Credentials from the environment only.** There is no `--access-key` and no
+  place for one in `firedrill.yml`, because `/proc/*/cmdline` is world-readable
+  and CI logs echo command lines. boto3's default chain already does the right
+  thing.
+- **A presigned URL's signature is a credential**, so it is stripped from
+  every report, log line and finding, and plain `http` to a non-local host is
+  refused outright rather than putting a working one on the wire.
+
 ## The ladder, and `firedrill.yml`
 
 A bare `firedrill run` proves the backup restores and answers queries. To prove
@@ -151,6 +185,8 @@ tick. "Nothing asked for this" and "this passed" are different facts.
 | `EMPTY_RESTORE` | restored cleanly and contains no user tables |
 | `TARGET_UNAVAILABLE` | the restore could not be attempted |
 | `RTO_EXCEEDED` | slower than the stated budget |
+| `FETCH_FAILED` | the artefact could not be obtained, or is not the bytes that were claimed |
+| `SOURCE_AMBIGUOUS` | a path *and* a configured source — which backup did you mean? |
 | `VERSION_MISMATCH` | `--postgres` pinned a major the archive did not come from |
 | `STRUCTURE_MISSING` | an object in the committed reference did not come back |
 | `STRUCTURE_UNEXPECTED` | the database has drifted from the reference |

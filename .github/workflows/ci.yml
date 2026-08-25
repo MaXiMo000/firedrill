@@ -29,7 +29,11 @@ jobs:
       # where it happened to already be installed. Installing the project
       # itself means the dependency list cannot drift away from CI again.
       - name: Install the package and its declared dependencies
-        run: python -m pip install --disable-pip-version-check -e .
+        # .[s3] because the S3 source tests must genuinely run on Linux, where
+        # --require-integration turns a skip into a build failure. Installing
+        # the base package would let them skip, and a skipped test that looks
+        # like a pass is the failure this whole project is about.
+        run: python -m pip install --disable-pip-version-check -e ".[s3]"
 
       # Linux runners can run Linux containers, so the restore tests MUST run
       # there and --require-integration fails the build if any of them skipped.

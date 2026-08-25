@@ -18,6 +18,8 @@ from __future__ import annotations
 import dataclasses
 import io
 import json
+import time
+import hashlib
 import pathlib
 import subprocess
 import sys
@@ -602,6 +604,27 @@ semantics:
 """, "ambiguous")
 
 
+def test_pyproject_table_ordering_cannot_swallow_the_urls():
+    """A regression test for a bug no other test here could see.
+
+    `urls.Source = ...` are bare keys in the [project] table. Opening
+    [project.optional-dependencies] above them silently reparents them into
+    it, and the package then fails to build -- while the whole suite still
+    passes, because the suite imports the source tree and never builds it.
+
+    Checked by string position rather than tomllib, which is 3.11+ and this
+    project's floor is 3.10. A skip here would fail CI anyway, by design.
+    """
+    text = (HERE.parent / "pyproject.toml").read_text(encoding="utf-8")
+    extras = text.find("[project.optional-dependencies]")
+    check("the extras table exists", extras > 0, True)
+    for key in ("urls.Source", "urls.Issues", "urls.Changelog"):
+        position = text.find(key)
+        check(f"{key} is declared", position > 0, True)
+        check(f"{key} is above the extras table, not captured by it",
+              position < extras, True)
+
+
 def test_readme_yaml_examples_actually_load():
     """Config documentation that does not parse is worse than none: it costs a
     reader their time and their trust. Every ```yaml block in the README is
@@ -1129,6 +1152,197 @@ def test_integration_fast_tier_misses_what_it_says_it_misses():
           report.stage("volume").status, drill.NOT_RUN)
 
 
+# ------------------------------------------------------------- sources -----
+# PLAN.md §9 Phase 2's exit condition is "runs against a real bucket with
+# read-only credentials". A real AWS bucket is not something a test suite may
+# create, so these run against MinIO: a real S3 server speaking the real
+# protocol over a real socket, with credentials taken from the environment
+# exactly as §7 requires. What that does NOT prove is AWS-specific IAM
+# behaviour, and this comment is here so nobody later mistakes one for the
+# other.
+
+import contextlib
+
+
+@contextlib.contextmanager
+def _minio():
+    """A throwaway S3 server, torn down in a finally like everything else."""
+    import uuid
+    name = f"firedrill-minio-{uuid.uuid4().hex[:8]}"
+    started = subprocess.run(
+        ["docker", "run", "-d", "--name", name, "--label", "firedrill=1",
+         "-e", "MINIO_ROOT_USER=firedrilltest",
+         "-e", "MINIO_ROOT_PASSWORD=firedrilltest-secret",
+         "-p", "0:9000", "minio/minio", "server", "/data"],
+        capture_output=True, text=True)
+    if started.returncode != 0:
+        raise Skip(f"could not start minio: {started.stderr.strip()[:120]}")
+    try:
+        mapped = subprocess.run(["docker", "port", name, "9000/tcp"],
+                                capture_output=True, text=True).stdout.strip()
+        endpoint = f"http://127.0.0.1:{mapped.splitlines()[0].rsplit(':', 1)[1]}"
+        import os
+        import boto3
+        os.environ.setdefault("AWS_ACCESS_KEY_ID", "firedrilltest")
+        os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "firedrilltest-secret")
+        os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
+        client = boto3.client("s3", endpoint_url=endpoint)
+        for _ in range(120):
+            try:
+                client.list_buckets()
+                break
+            except Exception:
+                time.sleep(0.5)
+        else:
+            raise Skip("minio never became ready")
+        yield endpoint, client
+    finally:
+        subprocess.run(["docker", "rm", "-f", "-v", name], capture_output=True)
+
+
+def _needs_boto3():
+    try:
+        import boto3  # noqa: F401
+    except ModuleNotFoundError:
+        raise Skip("boto3 is not installed; the s3 source is an optional extra")
+
+
+def _s3_cfg(endpoint: str, extra: str) -> str:
+    return (f"version: 1\nsource:\n  type: s3\n  bucket: backups\n"
+            f"  endpoint_url: {endpoint}\n{extra}")
+
+
+def test_integration_s3_source_against_a_real_bucket():
+    needs_docker()
+    _needs_boto3()
+    with _minio() as (endpoint, client):
+        client.create_bucket(Bucket="backups")
+        dump = corpus("healthy_pg16.dump")
+        client.upload_file(str(dump), "backups", "postgres/daily/2026-08-24.dump")
+        time.sleep(1.1)   # LastModified has one-second resolution
+        client.upload_file(str(dump), "backups", "postgres/daily/2026-08-25.dump")
+        digest = hashlib.sha256(dump.read_bytes()).hexdigest()
+
+        explicit = drill.run(cfg=config.loads(_s3_cfg(
+            endpoint, "  key: postgres/daily/2026-08-24.dump\n")))
+        check("an explicit key restores", explicit.exit_code, 0)
+        check("and the report names the object, not a temp path",
+              explicit.dump, "s3://backups/postgres/daily/2026-08-24.dump")
+
+        newest = drill.run(cfg=config.loads(_s3_cfg(
+            endpoint, "  prefix: postgres/daily/\n  select: newest\n")))
+        check("newest picks the later object",
+              newest.dump, "s3://backups/postgres/daily/2026-08-25.dump")
+        check("and it restores", newest.exit_code, 0)
+
+        good = drill.run(cfg=config.loads(_s3_cfg(
+            endpoint,
+            f"  key: postgres/daily/2026-08-25.dump\n  sha256: {digest}\n")))
+        check("a matching checksum passes", good.exit_code, 0)
+        check("and the stage says it was verified",
+              "sha256 verified" in good.stage("fetch").detail, True)
+
+
+def test_integration_s3_failures_are_never_a_pass():
+    """A backup that cannot be fetched is not a backup. Each of these must
+    report, and none of them may reach a container."""
+    needs_docker()
+    _needs_boto3()
+    with _minio() as (endpoint, client):
+        client.create_bucket(Bucket="backups")
+        client.upload_file(str(corpus("healthy_pg16.dump")), "backups", "b.dump")
+
+        for label, extra in (
+            ("a checksum that does not match", f"  key: b.dump\n  sha256: {'c' * 64}\n"),
+            ("an object that is not there", "  key: nope.dump\n"),
+            ("a prefix with nothing under it", "  prefix: empty/\n"),
+        ):
+            report = drill.run(cfg=config.loads(_s3_cfg(endpoint, extra)))
+            check(f"{label}: reported", [f.rule for f in report.findings],
+                  ["FETCH_FAILED"])
+            check(f"{label}: non-zero", report.exit_code, 1)
+            check(f"{label}: no container was started",
+                  report.stage("target").status, drill.NOT_RUN)
+            check(f"{label}: and it is not 'verified'", report.verified, False)
+
+
+def test_integration_https_source_and_its_checksums():
+    """One implementation covers every provider's presigned-URL case."""
+    needs_docker()
+    import functools
+    import http.server
+    import socketserver
+    import threading
+
+    root = str(CORPUS.resolve())
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=root)
+
+    class Server(socketserver.TCPServer):
+        allow_reuse_address = True
+
+        def log_message(self, *a):  # pragma: no cover
+            pass
+
+    dump = corpus("healthy_pg16.dump")
+    server = Server(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/healthy_pg16.dump"
+        digest = hashlib.sha256(dump.read_bytes()).hexdigest()
+
+        good = drill.run(cfg=config.loads(
+            f"version: 1\nsource:\n  type: https\n  url: {url}\n"
+            f"  sha256: {digest}\n  size: {dump.stat().st_size}\n"))
+        check("fetched and restored", good.exit_code, 0)
+        check("the origin has no query string in it", "?" in good.dump, False)
+
+        for label, extra in (("checksum", f"  sha256: {'b' * 64}\n"),
+                             ("size", "  size: 999999\n")):
+            bad = drill.run(cfg=config.loads(
+                f"version: 1\nsource:\n  type: https\n  url: {url}\n{extra}"))
+            check(f"a wrong {label} is caught at the door",
+                  [f.rule for f in bad.findings], ["FETCH_FAILED"])
+            check(f"a wrong {label} never reaches a container",
+                  bad.stage("target").status, drill.NOT_RUN)
+
+        missing = drill.run(cfg=config.loads(
+            f"version: 1\nsource:\n  type: https\n"
+            f"  url: http://127.0.0.1:{server.server_address[1]}/nope.dump\n"))
+        check("404 is reported", [f.rule for f in missing.findings], ["FETCH_FAILED"])
+    finally:
+        server.shutdown()
+
+
+def test_plain_http_to_a_remote_host_is_refused():
+    """A presigned URL's signature IS a credential and lives in the query
+    string, so plain http would put a working one on the wire in clear text."""
+    report = drill.run(cfg=config.loads(
+        "version: 1\nsource:\n  type: https\n  url: http://s3.example.com/b.dump\n"))
+    check("refused", [f.rule for f in report.findings], ["FETCH_FAILED"])
+    check("and says why", "clear text" in report.findings[0].message, True)
+
+
+def test_source_origin_never_carries_a_signature():
+    """The unit-level guarantee behind the test above."""
+    from firedrill import sources
+    signed = ("https://bucket.s3.amazonaws.com/db.dump"
+              "?X-Amz-Signature=deadbeef&X-Amz-Credential=AKIAREAL")
+    safe = sources._safe_origin(signed)
+    check("path kept", safe, "https://bucket.s3.amazonaws.com/db.dump")
+    for secret in ("X-Amz-Signature", "deadbeef", "AKIAREAL", "?"):
+        check(f"{secret} is gone", secret in safe, False)
+
+
+def test_a_dump_path_and_a_configured_source_is_refused():
+    """Guessing which backup was meant is the one thing a restore tool must
+    never do."""
+    report = drill.run(corpus("healthy_pg16.dump") if CORPUS.exists() else "x.dump",
+                       cfg=config.loads(
+                           "version: 1\nsource:\n  type: local\n  path: /tmp/other.dump\n"))
+    check("refused", [f.rule for f in report.findings], ["SOURCE_AMBIGUOUS"])
+    check("nothing ran", report.verified, False)
+
+
 def test_integration_leaves_no_containers_behind():
     needs_docker()
     before = set(docker.orphans())
@@ -1210,7 +1424,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 92
+    FLOOR = 99
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "

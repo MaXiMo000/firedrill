@@ -19,15 +19,26 @@ classifiers = [
     "Topic :: System :: Archiving :: Backup",
     "Topic :: System :: Recovery Tools",
 ]
-# Phase 0 is the standard library and nothing else. The archive header is parsed
-# in pure Python and every database operation happens inside the target
-# container, so there is no host Postgres client and no driver to install.
-# psycopg arrives in Phase 1 with the checks that actually need a connection.
+# The archive header is parsed in pure Python and every database operation
+# happens inside the target container via `docker exec psql`, so there is no
+# host Postgres client and no driver to install. psycopg was planned here and
+# deliberately not taken: it would have needed a published port, spending the
+# "not reachable from the host" property docker.py relies on, to get typed
+# results for queries that only ever return one number.
 dependencies = ["PyYAML>=6.0"]
 
 urls.Source = "https://github.com/MaXiMo000/firedrill"
 urls.Issues = "https://github.com/MaXiMo000/firedrill/issues"
 urls.Changelog = "https://github.com/MaXiMo000/firedrill/releases"
+
+# Placed after the urls above, not before: these are bare `urls.*` keys in the
+# [project] table, and starting a new table ahead of them silently reparents
+# them into it. The local test suite cannot see that -- only building the
+# package can -- so this ordering matters more than it looks.
+[project.optional-dependencies]
+# boto3 is large and most people restore from a local path or a presigned
+# URL, so the s3 source is opt-in.
+s3 = ["boto3>=1.34"]
 
 [project.scripts]
 firedrill = "firedrill.cli:main"

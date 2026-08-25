@@ -10,13 +10,16 @@ from __future__ import annotations
 
 import dataclasses
 import pathlib
+import shutil
+import tempfile
 import time
 
-from . import archive, docker, ladder, restore as restore_stage
+from . import archive, docker, ladder, restore as restore_stage, sources
+from . import config as _config_module
 from .config import DEFAULT as DEFAULT_CONFIG
 from .finding import DEFAULT_FAIL_ON, Finding, should_fail, worst
 
-STAGES = ("inspect", "target", "restore", "smoke",
+STAGES = ("fetch", "inspect", "target", "restore", "smoke",
           "structure", "volume", "semantics", "integrity")
 
 OK = "ok"
@@ -85,7 +88,7 @@ class Report:
         }
 
 
-def run(dump_path: str | pathlib.Path, *, cfg=None, **kw) -> Report:
+def run(dump_path: str | pathlib.Path | None = None, *, cfg=None, **kw) -> Report:
     """Drill the backup, then apply the config's suppressions.
 
     Suppression happens here, in one place, rather than at each of the five
@@ -93,7 +96,14 @@ def run(dump_path: str | pathlib.Path, *, cfg=None, **kw) -> Report:
     finding, or worse, suppress one the user never asked to hide.
     """
     cfg = cfg if cfg is not None else DEFAULT_CONFIG
-    return _suppress(_run(dump_path, cfg=cfg, **kw), cfg)
+    # One scratch directory for anything downloaded, removed however this
+    # exits. A local source is read in place and never lands here, so a
+    # cleanup bug cannot reach the user's own backup file.
+    workdir = pathlib.Path(tempfile.mkdtemp(prefix="firedrill-"))
+    try:
+        return _suppress(_run(dump_path, cfg=cfg, workdir=workdir, **kw), cfg)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def _is_older(target: str, source: str) -> bool:
@@ -133,21 +143,63 @@ def _suppress(report: Report, cfg) -> Report:
     return report
 
 
-def _run(dump_path: str | pathlib.Path, *, flavour: str = "",
+def _run(dump_path: str | pathlib.Path | None = None, *, flavour: str = "",
          rto_budget: float | None = None, fail_on: str = DEFAULT_FAIL_ON,
          pin_major: str | None = None, cfg=DEFAULT_CONFIG,
          write_reference: str | pathlib.Path | None = None,
+         workdir: pathlib.Path | None = None,
          ready_timeout: int = docker.DEFAULT_READY_TIMEOUT) -> Report:
-    dump_path = pathlib.Path(dump_path)
     if rto_budget is None:
         rto_budget = cfg.rto_budget
     stages = [Stage(name) for name in STAGES]
-    report = Report(dump=str(dump_path), stages=stages, findings=[], archive={},
+    report = Report(dump=str(dump_path or ""), stages=stages, findings=[], archive={},
                     rto_budget=rto_budget, fail_on=fail_on, tier=cfg.tier)
     began = time.monotonic()
 
     def stage(name: str) -> Stage:
         return next(s for s in stages if s.name == name)
+
+    # -- fetch -------------------------------------------------------------
+    # A positional path and a configured source both name one artefact; local
+    # is the degenerate case, so there is one code path and the checksum check
+    # applies to a local file too.
+    source = cfg.source
+    if source is None:
+        source = _config_module.Source(type="local", path=str(dump_path))
+    elif dump_path is not None:
+        report.findings.append(Finding(
+            stage="fetch", rule="SOURCE_AMBIGUOUS", severity="critical",
+            message="a dump path was given on the command line and the config "
+                    "also defines a source",
+            fix="Remove one. Guessing which backup was meant is the one thing a "
+                "restore tool must never do.",
+            evidence="",
+        ))
+        report.total_seconds = time.monotonic() - began
+        return report
+
+    try:
+        artifact = sources.fetch(source, workdir or pathlib.Path("."))
+    except sources.SourceError as exc:
+        stage("fetch").status = NOT_RUN
+        stage("fetch").detail = str(exc).splitlines()[0]
+        report.findings.append(Finding(
+            stage="fetch", rule="FETCH_FAILED", severity="critical",
+            message=f"the backup could NOT be verified: {exc}",
+            fix="Nothing was restored, so nothing has been proved about this "
+                "backup. A backup that cannot be fetched is not a backup.",
+            evidence="",
+        ))
+        report.total_seconds = time.monotonic() - began
+        return report
+
+    dump_path = artifact.path
+    report.dump = artifact.origin
+    stage("fetch").status = OK
+    stage("fetch").seconds = artifact.fetch_seconds
+    stage("fetch").detail = (
+        f"{artifact.size:,} bytes from {source.type}"
+        + ("  sha256 verified" if source.sha256 else ""))
 
     # -- inspect -----------------------------------------------------------
     started = time.monotonic()

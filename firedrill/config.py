@@ -134,6 +134,28 @@ class SemanticCheck:
         return f"{self.op} {self.threshold}"
 
 
+IMPLEMENTED_SOURCES = ("local", "https", "s3")
+# gcs is PLAN.md §9 Phase 2 as written, and is refused rather than half-built:
+# there is no way to verify it here, and an unverified source is a way to fail
+# to fetch a backup while reporting something reassuring.
+ALL_SOURCES = ("local", "https", "s3", "gcs")
+
+
+@dataclasses.dataclass(frozen=True)
+class Source:
+    """Where the artefact comes from. Read-only by construction (sources.py)."""
+    type: str = "local"
+    path: str | None = None
+    url: str | None = None
+    bucket: str | None = None
+    key: str | None = None
+    prefix: str | None = None
+    endpoint_url: str | None = None
+    region: str | None = None
+    sha256: str | None = None
+    size: int | None = None
+
+
 @dataclasses.dataclass(frozen=True)
 class VolumeRule:
     min_rows: int | None = None
@@ -150,6 +172,7 @@ class Config:
     volume_tables: dict = dataclasses.field(default_factory=dict)
     semantics: tuple = ()
     ignore: dict = dataclasses.field(default_factory=dict)
+    source: Source | None = None
     path: pathlib.Path | None = None
 
     def is_ignored(self, rule: str) -> bool:
@@ -161,8 +184,10 @@ class Config:
 
 DEFAULT = Config()
 
-_TOP = ("version", "target", "tier", "rto_budget", "structure", "volume",
-        "semantics", "ignore")
+_TOP = ("version", "source", "target", "tier", "rto_budget", "structure",
+        "volume", "semantics", "ignore")
+
+_SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 def loads(text: str, path: pathlib.Path | None = None) -> Config:
@@ -186,6 +211,8 @@ def loads(text: str, path: pathlib.Path | None = None) -> Config:
             "version 1. Set `version: 1` explicitly so an old file cannot be "
             "read under new rules."
         )
+
+    source = _parse_source(raw.get("source"))
 
     # -- target ------------------------------------------------------------
     target = _require_mapping(raw.get("target"), "target")
@@ -265,6 +292,7 @@ def loads(text: str, path: pathlib.Path | None = None) -> Config:
 
     return Config(
         version=1,
+        source=source,
         tier=tier,
         rto_budget=rto_budget,
         structure_reference=structure_reference,
@@ -273,6 +301,95 @@ def loads(text: str, path: pathlib.Path | None = None) -> Config:
         semantics=tuple(semantics),
         ignore=ignore,
         path=path,
+    )
+
+
+_SOURCE_KEYS = ("type", "path", "url", "bucket", "key", "prefix", "select",
+                "endpoint_url", "region", "sha256", "size")
+
+# Which keys make sense for which type. Naming a key the chosen source cannot
+# use is an error: it means the user believes they configured something that
+# will not be read, which is how the wrong backup gets restored quietly.
+_SOURCE_ALLOWED = {
+    "local": {"type", "path", "sha256", "size"},
+    "https": {"type", "url", "sha256", "size"},
+    "s3": {"type", "bucket", "key", "prefix", "select", "endpoint_url",
+           "region", "sha256", "size"},
+}
+
+
+def _parse_source(raw) -> Source | None:
+    if raw is None:
+        return None
+    raw = _require_mapping(raw, "source")
+    _reject_unknown(raw, _SOURCE_KEYS, "source")
+
+    kind = raw.get("type", "local")
+    if kind not in ALL_SOURCES:
+        raise ConfigError(
+            f"source.type {kind!r} must be one of {', '.join(ALL_SOURCES)}")
+    if kind not in IMPLEMENTED_SOURCES:
+        raise ConfigError(
+            f"source.type {kind!r} is not implemented yet. Refused rather than "
+            "accepted, because a source that cannot fetch is a run that proves "
+            "nothing while looking like it tried. For Google Cloud Storage, use "
+            "`type: https` with a signed URL today."
+        )
+
+    stray = set(raw) - _SOURCE_ALLOWED[kind]
+    if stray:
+        raise ConfigError(
+            f"source type {kind!r} does not use: {', '.join(sorted(stray))}. "
+            "Those keys would be silently ignored, and a setting you believe is "
+            "in force but is not is how the wrong backup gets restored."
+        )
+
+    if kind == "local" and not raw.get("path"):
+        raise ConfigError("source.path is required for type: local")
+    if kind == "https" and not raw.get("url"):
+        raise ConfigError("source.url is required for type: https")
+    if kind == "s3":
+        if not raw.get("bucket"):
+            raise ConfigError("source.bucket is required for type: s3")
+        if bool(raw.get("key")) == bool(raw.get("prefix")):
+            raise ConfigError(
+                "source needs exactly one of `key` (an explicit object) or "
+                "`prefix` (with the newest object under it chosen). Both, or "
+                "neither, is ambiguous about which backup gets restored."
+            )
+        select = raw.get("select", "newest")
+        if select != "newest":
+            raise ConfigError(
+                f"source.select {select!r} is not supported; only `newest` is. "
+                "An explicit object is spelled `key`."
+            )
+
+    sha = raw.get("sha256")
+    if sha is not None and not _SHA256.match(str(sha)):
+        # A digest of only digits is read by YAML as a number, and one with
+        # leading zeros loses them entirely -- so the value that arrives here
+        # is not the value that was written. Say that, rather than showing the
+        # mangled version back and leaving the reader to work it out.
+        hint = ("  Quote it: YAML reads a bare all-digit value as a number.\n"
+                if not isinstance(sha, str) else "")
+        raise ConfigError(
+            f"source.sha256 {sha!r} is not a 64-character hex digest.\n"
+            f"{hint}"
+            "A checksum that cannot be compared is worse than none: it looks "
+            "like verification and is not."
+        )
+
+    size = raw.get("size")
+    if size is not None and (not isinstance(size, int) or size < 0):
+        raise ConfigError("source.size must be a non-negative integer of bytes")
+
+    return Source(
+        type=kind,
+        path=raw.get("path"), url=raw.get("url"),
+        bucket=raw.get("bucket"), key=raw.get("key"), prefix=raw.get("prefix"),
+        endpoint_url=raw.get("endpoint_url"), region=raw.get("region"),
+        sha256=str(sha).lower() if sha is not None else None,
+        size=size,
     )
 
 
