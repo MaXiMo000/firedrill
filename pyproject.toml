@@ -1,6 +1,6 @@
 [project]
 name = "firedrill"
-version = "0.1.1"
+version = "0.1.2"
 description = "A backup you have not restored is not a backup. firedrill restores it and proves it is usable."
 requires-python = ">=3.10"
 readme = "README.md"

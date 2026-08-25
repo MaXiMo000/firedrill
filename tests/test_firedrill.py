@@ -609,6 +609,29 @@ semantics:
 """, "ambiguous")
 
 
+def test_version_is_declared_in_exactly_one_place():
+    """A regression test for a version that drifted.
+
+    __init__.py used to hardcode __version__ alongside pyproject.toml's
+    `version =`. 0.1.1 was tagged with pyproject bumped and the literal left
+    behind, so the wheel was version 0.1.1 and `firedrill --version` printed
+    0.1.0. Only one CI step compared them.
+
+    This asserts the property rather than the number: __init__.py must not
+    contain a literal version at all, so the two cannot disagree again.
+    """
+    init = (HERE.parent / "firedrill" / "__init__.py").read_text(encoding="utf-8")
+    literals = re.findall(r'__version__\s*=\s*["\']([0-9]+\.[0-9]+)', init)
+    check(f"no hardcoded version in __init__.py (found {literals})", literals, [])
+    check("it reads the installed distribution instead",
+          "importlib.metadata" in init, True)
+
+    declared = re.findall(r'^version\s*=\s*"([^"]+)"',
+                          (HERE.parent / "pyproject.toml").read_text(encoding="utf-8"),
+                          re.M)
+    check("pyproject declares exactly one version", len(declared), 1)
+
+
 def test_pyproject_table_ordering_cannot_swallow_the_urls():
     """A regression test for a bug no other test here could see.
 
@@ -1934,7 +1957,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 122
+    FLOOR = 123
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "
