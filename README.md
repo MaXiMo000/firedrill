@@ -121,6 +121,22 @@ Three properties worth stating plainly:
   every report, log line and finding, and plain `http` to a non-local host is
   refused outright rather than putting a working one on the wire.
 
+## Which PostgreSQL versions
+
+Tested end to end against **13, 14, 15, 16, 17 and 18** — dump on any of them,
+restored into a container of that same major, read out of the archive header.
+Archive formats 1.14 (13–15), 1.15 (16) and 1.16 (17–18) each have a committed
+header fixture, so the parser stays covered even where containers cannot run.
+
+One honest limit: `datcollversion` arrived in PostgreSQL 15, so on 13 and 14 no
+collation version exists to compare. firedrill reports `COLLATION_UNVERIFIABLE`
+there rather than pretending — nothing, not this tool and not PostgreSQL, can
+tell you whether text indexes on those servers sort like production's.
+
+A structure reference is portable across all six: taken on 14, it is clean
+against a restore on 18. Upgrading Postgres must not turn every check red,
+because that is how a team learns to ignore the tool.
+
 ## Tiers: how much to restore
 
 A 2 TB restore cannot run on every commit.

@@ -32,6 +32,13 @@ HEADERS_OUT = HERE / "headers"
 # parser must not be brittle about.
 VERSIONS = ("16", "18")
 
+# Committed 512-byte headers, so the pure-Python parser stays covered on a
+# machine that cannot run Linux containers at all. 13 is here because it writes
+# archive format 1.14, where compression is an Int rather than the single byte
+# 1.15+ uses -- the branch whose comment says it is easy to get wrong was the
+# one with no fixture behind it. 16 is 1.15, 18 is 1.16.
+HEADER_VERSIONS = ("13", "16", "18")
+
 
 # One schema, shared by the healthy fixture and every broken variant of it.
 # The variants must differ from healthy in exactly one respect, or a test that
@@ -346,6 +353,18 @@ def build(outdir: pathlib.Path = DEFAULT_OUT) -> dict:
         path = outdir / f"{label}.dump"
         path.write_bytes(whole[:size])
         made[label] = path
+
+    # Headers for majors the corpus does not otherwise build, so every archive
+    # format version the parser understands has a committed fixture.
+    for major in HEADER_VERSIONS:
+        target = HEADERS_OUT / f"pg{major}.header"
+        if target.exists():
+            continue
+        with Source(major) as src:
+            src.psql(SCHEMA)
+            probe = src.dump(outdir / f"_header_pg{major}.dump")
+        target.write_bytes(probe.read_bytes()[:512])
+        probe.unlink()
 
     # -- pitr is NOT built here. It needs its own server with archiving on,
     # and the test suite builds it on first use. Building it from both places

@@ -92,6 +92,22 @@ def test_header_pg18():
     check("pg18 major", header.server_major, "18")
 
 
+def test_header_pg13_is_the_older_archive_format():
+    """Archive 1.14, where compression is an Int rather than a single byte.
+
+    That branch is the one the parser's own comment calls easy to get wrong,
+    and it had no committed fixture -- so on any machine that cannot run Linux
+    containers it was never exercised at all. PostgreSQL 13, 14 and 15 all
+    write 1.14.
+    """
+    header = archive.read_header(HEADERS / "pg13.header")
+    check("archive version", header.archive_version, (1, 14, 0))
+    check("major", header.server_major, "13")
+    check("format", header.format_name, "custom")
+    # -1 is "default", and reading it as a byte would give 255.
+    check("compression read as a signed Int, not a byte", header.compression, -1)
+
+
 def test_header_compression_field_width_changed_at_1_15():
     """PG 15 and earlier write compression as an Int; 1.15+ writes one byte.
 
@@ -2035,6 +2051,69 @@ def test_pitr_refuses_an_injecting_target_before_starting_anything():
     check("recovery never ran", report.stage("recover").status, drill.NOT_RUN)
 
 
+def test_integration_older_majors_are_supported_and_honest():
+    """PostgreSQL 13 and 14 have no collation version to read.
+
+    datlocprovider and datcollversion arrived in 15. Selecting them failed the
+    WHOLE snapshot query on older servers, so `--write-reference` wrote nothing
+    and the structure rung was unusable on two majors that are still widely
+    deployed. Measured, not guessed.
+
+    The honest outcome is not "unreadable" -- there is genuinely nothing to
+    read, and no tool can answer the question on those versions.
+    """
+    needs_docker()
+    import make_corpus
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        with make_corpus.Source("14") as src:
+            src.psql("create table t(id serial primary key, v text not null);")
+            dump = src.dump(pathlib.Path(tmp) / "pg14.dump", db="postgres")
+
+        ref = pathlib.Path(tmp) / "pg14.txt"
+        report = drill.run(dump, write_reference=ref)
+        check("the snapshot works on 14", report.stage("structure").status, drill.OK)
+        check("and actually wrote a reference", ref.exists(), True)
+        check("restored into a matching major",
+              report.archive["restored_into_major"], "14")
+
+        rules = {f.rule for f in report.findings}
+        check("collation is unverifiable, not unreadable",
+              ("COLLATION_UNVERIFIABLE" in rules, "COLLATION_UNREADABLE" in rules),
+              (True, False))
+        check("and it says why",
+              "predates collation version tracking" in report.findings[0].message, True)
+        check("medium, so it does not fail a build on an old server",
+              report.exit_code, 0)
+
+
+def test_integration_a_reference_survives_a_major_upgrade():
+    """One committed reference, taken on 14, against a restore on 16.
+
+    Upgrading Postgres must not turn every structure check red -- that is how
+    a team learns to ignore the tool. The collation line is excluded from the
+    diff for exactly this reason and reported by its own rung instead.
+    """
+    needs_docker()
+    import make_corpus
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        dumps = {}
+        for major in ("14", "16"):
+            with make_corpus.Source(major) as src:
+                src.psql("create table t(id serial primary key, v text not null);")
+                src.psql("create index on t(v);")
+                dumps[major] = src.dump(pathlib.Path(tmp) / f"pg{major}.dump")
+
+        ref = pathlib.Path(tmp) / "pg14.txt"
+        drill.run(dumps["14"], write_reference=ref)
+        cfg = config.loads(f"version: 1\nstructure:\n  reference: {ref}\n")
+
+        report = drill.run(dumps["16"], cfg=cfg)
+        structural = [f.rule for f in report.findings if f.rule.startswith("STRUCTURE")]
+        check("a 14 reference is clean against a 16 restore", structural, [])
+
+
 def test_integration_leaves_no_containers_behind():
     needs_docker()
     before = set(docker.orphans())
@@ -2116,7 +2195,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 128
+    FLOOR = 131
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "

@@ -159,11 +159,30 @@ union all
 -- libc that produced it. Excluded from the structure diff (see structure())
 -- and read by collation() instead, because a sort-order change deserves its
 -- own message rather than being one line of generic drift.
-select 'collation', datcollate,
-       datlocprovider::text || ' ' || coalesce(datcollversion, '')
+select 'collation', datcollate, {collation_detail}
 from pg_database where datname = current_database()
 order by 1, 2
 """
+
+# datlocprovider and datcollversion arrived in PostgreSQL 15. Selecting them on
+# 13 or 14 fails the WHOLE snapshot query -- measured: `--write-reference`
+# returned STRUCTURE_UNREADABLE and wrote nothing, so the entire structure rung
+# was unusable on two majors that are still widely deployed.
+_COLLATION_SINCE_15 = "datlocprovider::text || ' ' || coalesce(datcollversion, '')"
+_COLLATION_BEFORE_15 = "''"
+
+# PostgreSQL 15.
+_COLLVERSION_MIN = 150000
+
+
+def server_version_num(container, database: str) -> int:
+    """e.g. 160015. Zero when it cannot be read."""
+    result = container.sql("select current_setting('server_version_num')",
+                           database=database)
+    try:
+        return int(result.stdout.strip())
+    except (ValueError, AttributeError):
+        return 0
 
 # Snapshot lines that structure() must not diff, because another rung owns
 # them and reports them with the explanation they need.
@@ -177,7 +196,11 @@ def snapshot(container, database: str) -> str:
     # query -- which happened here, silently dropping whole branches
     # while still returning valid-looking rows. psql -c takes
     # multi-line SQL perfectly well.
-    result = container.sql(_SNAPSHOT.strip(), database=database)
+    detail = (_COLLATION_SINCE_15
+              if server_version_num(container, database) >= _COLLVERSION_MIN
+              else _COLLATION_BEFORE_15)
+    result = container.sql(_SNAPSHOT.strip().format(collation_detail=detail),
+                           database=database)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "catalog query failed")
     lines = [line for line in result.stdout.strip().splitlines() if line]
@@ -411,6 +434,25 @@ def collation(container, cfg, database: str) -> tuple[list[Finding], dict]:
       only visible against what production actually used.
     """
     findings: list[Finding] = []
+    if server_version_num(container, database) < _COLLVERSION_MIN:
+        # Not a failure to read: there is genuinely nothing to read. Postgres
+        # only began recording a collation version in 15, so on 13 and 14 no
+        # tool can answer this question -- which is worth saying plainly rather
+        # than reporting as if the query broke.
+        collate = container.sql(
+            "select datcollate from pg_database where datname = current_database()",
+            database=database).stdout.strip()
+        return [Finding(
+            stage="integrity", rule="COLLATION_UNVERIFIABLE", severity="medium",
+            message="this server predates collation version tracking (added in "
+                    "PostgreSQL 15), so sort order cannot be verified here",
+            fix="Nothing -- not this tool, not PostgreSQL -- can tell you "
+                "whether text indexes on this target sort the way production's "
+                "do. Compare the libc versions by hand, or restore on 15 or "
+                "later where the server records it.",
+            evidence="",
+        )], {"collate": collate, "provider": "", "version": ""}
+
     probe = container.sql(
         "select datcollate, datlocprovider, coalesce(datcollversion, '') "
         "from pg_database where datname = current_database()",
