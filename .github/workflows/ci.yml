@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Weekly, for the `published` job below. Nothing else needs a schedule.
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -170,6 +174,49 @@ jobs:
             "COULD NOT VERIFY"*) ;;
             *) echo "summary did not distinguish unverified from failed"; exit 1 ;;
           esac
+
+  published:
+    # What we actually shipped, installed the way a stranger installs it.
+    # Every other job tests the working tree; this one tests PyPI and the
+    # published action tag, which is where "it worked on main" stops being
+    # the same claim as "it works". Not on every push -- that would couple
+    # each commit to PyPI being reachable -- but weekly, and on demand.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: pip install firedrill, from PyPI
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/v
+          /tmp/v/bin/pip install --disable-pip-version-check -q 'firedrill[s3]'
+          /tmp/v/bin/firedrill --version
+          /tmp/v/bin/python -c "import boto3, yaml"
+
+      - name: A backup it should pass, and one it should not
+        run: |
+          set -euo pipefail
+          python tests/make_corpus.py /tmp/corpus
+          /tmp/v/bin/firedrill run /tmp/corpus/healthy_pg16.dump --quiet
+          if /tmp/v/bin/firedrill run /tmp/corpus/truncated_data.dump --quiet; then
+            echo "the published package exited 0 on a truncated backup"; exit 1
+          fi
+
+      - name: And the published action tag, with no install-from
+        id: drill
+        uses: MaXiMo000/firedrill@v0
+        with:
+          dump: /tmp/corpus/healthy_pg16.dump
+
+      - name: which must report what it found
+        run: |
+          set -euo pipefail
+          test "${{ steps.drill.outputs.ok }}" = "true"
+          test "${{ steps.drill.outputs.findings }}" = "0"
 
   package:
     # Build and install on every commit, not only at release. A packaging break
