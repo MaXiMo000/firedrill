@@ -662,7 +662,15 @@ def test_action_shell_scripts_are_valid_bash():
     import shutil
     import yaml as yaml_module
     if shutil.which("bash") is None:
-        raise Skip("bash is not available on this platform")
+        raise Skip("bash is not on PATH")
+    # Probe it before trusting it. On the Windows runners `bash` resolves to
+    # the WSL stub, which exits 1 with EMPTY stderr for a perfectly valid
+    # script -- so this check reported four failures that were entirely about
+    # the instrument. A tool that cannot parse `:` cannot parse anything.
+    probe = subprocess.run(["bash", "-n"], input=":\n",
+                           capture_output=True, text=True)
+    if probe.returncode != 0:
+        raise Skip("`bash -n` cannot parse a trivial script here; not a real bash")
 
     action = yaml_module.safe_load(
         (HERE.parent / "action.yml").read_text(encoding="utf-8"))
