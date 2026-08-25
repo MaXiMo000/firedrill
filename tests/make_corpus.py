@@ -200,8 +200,16 @@ def build_pitr(outdir: pathlib.Path) -> dict:
         # had not finished. WAL filenames sort in order, so comparing against
         # last_archived_wal is an exact condition rather than a guess at how
         # long a machine needs.
-        switched = psql("select pg_walfile_name(pg_switch_wal())",
+        # The name is taken BEFORE the switch, deliberately. pg_switch_wal()
+        # returns the position at the END of the segment it completed, and
+        # pg_walfile_name() of that lands on the segment that is now CURRENT --
+        # which will not be archived until something switches again. Waiting on
+        # it therefore waits forever: locally there happened to be a later
+        # segment already archived so the comparison passed by luck, and CI
+        # blocked on segment ...004 and raised.
+        switched = psql("select pg_walfile_name(pg_current_wal_lsn())",
                         tuples_only=True).stdout.strip()
+        psql("select pg_switch_wal();")
         psql("checkpoint;")
         deadline = time.time() + 120
         while time.time() < deadline:
