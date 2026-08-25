@@ -144,12 +144,26 @@ message about authentication, which looks like a bug in your Dockerfile.
 
 ## 6. GitHub Pages (the showcase site)
 
-1. **Settings → Pages → Build and deployment → Source: GitHub Actions.**
-2. Push anything under `site/`. `pages.yml` deploys it and prints the URL on the
-   run's summary.
-3. Optionally set the site as the repo's homepage: **About → ⚙ → Website**.
+**Live: <https://maximo000.github.io/firedrill/>**
 
-Pages does not need a tag — it deploys from `main` on every change to `site/`.
+Pages must be enabled **once**, out of band, and this is not optional
+hand-waving: the workflow cannot do it for you. `actions/configure-pages` takes
+an `enablement: true` flag, and it fails with *"Resource not accessible by
+integration"* — creating a Pages site needs admin rights that `GITHUB_TOKEN`
+does not have, whatever `permissions:` you grant it.
+
+Either click **Settings → Pages → Build and deployment → Source: GitHub
+Actions**, or do it from the CLI:
+
+```bash
+gh api -X POST repos/MaXiMo000/firedrill/pages -f build_type=workflow
+```
+
+After that, `pages.yml` deploys `site/` on every push that touches it, and no
+tag is needed. `enablement: true` stays in the workflow so a fork gets the
+clearer error rather than a bare 404.
+
+Optionally set it as the repo's homepage: **About → ⚙ → Website**.
 
 ---
 

@@ -9,6 +9,8 @@ restorable — not the day you need it.
 
 > A verification that could not run never reports as passing.
 
+**<https://maximo000.github.io/firedrill/>** — what it checks, and the measurements behind each check.
+
 That rule is the whole design. No Docker, an unreadable archive, a container
 that never came up — every one of those produces **COULD NOT VERIFY** and a
 non-zero exit, never a green tick. A backup tool that says "OK" because it
