@@ -48,9 +48,23 @@ set -e
 cp -a /seed/. "$PGDATA"/
 chown -R postgres:postgres "$PGDATA"
 chmod 700 "$PGDATA"
+
+# The WAL is copied in and re-owned rather than read from the mount. WAL
+# segments are mode 600 and owned by whatever uid wrote them, so on Linux the
+# postgres user inside this container frequently cannot read the bind-mounted
+# originals. A failing restore_command is not an error to Postgres -- it means
+# "segment unavailable" -- so recovery would silently replay NOTHING, reach
+# consistency, and report the target as unreachable. That failure is mute: no
+# error line, just an absence of "restored log file" lines. This script runs as
+# root, so it can do what postgres cannot.
+mkdir -p /walcopy
+cp -a /wal/. /walcopy/ 2>/dev/null || cp -r /wal/. /walcopy/
+chown -R postgres:postgres /walcopy
+chmod -R u+rw /walcopy
+
 touch "$PGDATA/recovery.signal"
 cat >> "$PGDATA/postgresql.conf" <<'FIREDRILL'
-restore_command = 'cp /wal/%f %p'
+restore_command = 'cp /walcopy/%f %p'
 recovery_target_time = '{target}'
 recovery_target_action = 'promote'
 FIREDRILL
