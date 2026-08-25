@@ -1,10 +1,28 @@
 # Publishing firedrill
 
-Everything in this file is account-side setup. The workflows already exist and
-are already correct — `release.yml` was written in Phase 0 and has **never
-executed**, because nothing has ever been tagged. That is the same "written but
-never fired" state the CI workflows were in before the first push, and the first
-run of those found a real bug. Expect the same here.
+**0.1.0 is published.** `pip install firedrill`,
+`ghcr.io/maximo000/firedrill:0.1.0`, and `MaXiMo000/firedrill@v0` all work, and
+a weekly CI job re-proves it rather than assuming.
+
+This file opened by predicting that `release.yml` — written in Phase 0, never
+executed — would fail on its first run the way the CI workflows had. It failed
+three times, and the prediction was the least interesting part:
+
+1. **`verify` never installed the package.** Written when firedrill was
+   stdlib-only; PyYAML arrived in Phase 1 and `ci.yml` learned about it while
+   `release.yml` never did. `ModuleNotFoundError: yaml`, at the gate.
+2. **The `image` job asked for two platforms and never set up buildx.**
+   *"Multi-platform build is not supported for the docker driver"* — a message
+   that only appears once a release is already half-published.
+3. **A real bug in firedrill itself**, caught by the release gate doing its
+   job: `pg_isready` succeeds *during* archive recovery, because Postgres
+   accepts read-only connections as soon as it reaches consistency. The PITR
+   promotion check was reading a lucky moment rather than waiting for one.
+
+The tag was moved rather than bumped each time, which is only safe because
+nothing had published yet. **Tag early.** A release pipeline is the
+least-exercised code in a repository and the worst possible place to discover
+that.
 
 There is no API token anywhere in this repo, and there must never be one. PyPI
 publishing uses **Trusted Publishing** over OIDC: PyPI verifies that the upload

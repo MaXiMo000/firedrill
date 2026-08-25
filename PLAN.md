@@ -363,7 +363,7 @@ restoring nothing passes the second.
 MySQL and MongoDB adapters *if and only if* the Postgres one is genuinely solid
 and someone asks. Postgres depth beats breadth here.
 
-**Phase 5.5 — the shop window and the field test** *(added mid-project)*
+**Phase 5.5 — the shop window and the field test** *(built; 0.1.0 released)*
 
 Two things that only make sense once the tool works, and which check each other:
 
@@ -383,9 +383,13 @@ Two things that only make sense once the tool works, and which check each other:
   publishes a seed or demo dump. Record what breaks, honestly, including the
   cases where firedrill is wrong rather than the backup.
 
-*Exit:* the page states only measured facts, and the field test has produced at
-least one finding that the synthetic corpus did not — or an explicit statement
-that it did not, which is itself a result worth publishing.
+*Exit met.* The page is at <https://maximo000.github.io/firedrill/> and a test
+asserts it quotes no rule the code cannot emit. The field test produced exactly
+the finding the exit condition hoped for and the corpus could not: pagila links
+all 13 of its sequences through the column DEFAULT rather than OWNED BY, so
+`SEQUENCE_BEHIND` examined nothing and reported "0 sequence(s)" — which reads
+as fine. The corpus could never have found it, because the corpus was written
+by the same person as the check, using `serial`.
 
 **Phase 6 — the writeup**
 *"I restored 200 open-source projects' backup scripts and N% produced something
