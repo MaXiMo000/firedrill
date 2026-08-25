@@ -59,7 +59,7 @@ not a feature, they are the price of admission.
 
 ## Status
 
-**Phases 0, 1 and 2 are built and green.** `main`, 103 tests / 290
+**Phases 0–3 are built and green.** `main`, 113 tests / 337
 checks / 0 skipped. Repo: <https://github.com/MaXiMo000/firedrill> (public).
 CI runs on every push: Linux/Windows × Python 3.10/3.13, plus image, package
 and dogfood jobs.
@@ -71,13 +71,14 @@ firedrill/
   restore.py   pg_restore inside the container + stderr classifier
   config.py    firedrill.yml -> typed settings, refuses ambiguity   [phase 1]
   sources.py   local / https / s3, read-only by construction        [phase 2]
+  history.py   last-known-good: durations, row counts, versions      [phase 3]
   ladder.py    structure / volume / semantics / integrity           [phase 1]
   drill.py     inspect -> target -> restore -> smoke -> ladder, each timed
   report.py    human table + --json
   cli.py       run / clean
 tests/
   make_corpus.py      builds the broken-backup fixtures from real containers
-  test_firedrill.py   103 tests; --require-integration makes a skip a failure
+  test_firedrill.py   113 tests; --require-integration makes a skip a failure
   headers/            512-byte committed headers so the parser is testable
                       on a runner that cannot run Linux containers
 ```
@@ -152,29 +153,32 @@ a guard, not as a dependency on that measurement holding.
 **Phase 1 is complete.** Every PLAN.md §8 fixture is built and every check is
 asserted in both directions against a real broken backup. What is left:
 
-**Phases 0, 1 and 2 are done. PLAN.md §9 Phase 3 is next** — the CI surface:
-a GitHub Action, JUnit output, `history.json` trends, and a PR comment that
-says *"restored in 4m12s, 0 findings"*.
+**Phases 0–3 are done. PLAN.md §9 Phase 4 is next** — point-in-time
+recovery: a base backup plus WAL, restored to a target timestamp, asserting a
+row written before it exists and one written after it does not. The check
+nobody does, and the one that actually proves PITR works.
 
-Phase 2 shipped `local` / `https` / `s3` sources with checksum-and-size
-verification, and all three tiers. Verified against MinIO — a real S3 server
-over a real socket, credentials from the environment — which proves the
-protocol path but **not** AWS IAM specifics; the test file says so rather
-than letting the two be confused.
+Phase 3 shipped `history.json` (which unblocked `volume.tolerance`), JUnit
+output, `action.yml`, and copy-paste workflows in `examples/`. The action is
+exercised by CI against this checkout in three directions — healthy, broken,
+and unverifiable — so it is not another control nobody has run.
+
+**One thing genuinely unproven:** `firedrill` is not on PyPI yet, so the
+action's *default* install path (`pip install firedrill[s3]`) has never
+executed. CI covers it via `install-from: .`. Publishing is the last step
+before anyone else can use `MaXiMo000/firedrill@v0`, and `release.yml` has
+still never run.
 
 Deferred, each with its refusal already written so none can be mistaken for
 working:
 
-- `volume.tolerance` — needs a baseline; arrives with Phase 3's
-  `history.json`. That baseline is also the natural home for the
-  last-known-good row counts §2 rung 4 wants.
 - `target.type: dsn` — until §7's four interlocks exist.
 - `source.type: gcs` — refused, pointing at `type: https` with a signed URL,
   which works today and is verified. GCS's S3-compatible XML API may also
   work through `type: s3` with `endpoint_url`, but that is **untested**, so it
-  is not claimed anywhere in the docs.
+  is not claimed anywhere.
 
-### Two measurements from Phase 2 worth not rediscovering
+### Measurements worth not rediscovering
 
 - `pg_restore --data-only -t customer` restores every row and leaves the
   sequence at **1**: setval is not part of a table-scoped data restore. That
@@ -184,6 +188,11 @@ working:
   in `pyproject.toml`. Opening it above them reparents them and breaks the
   build, while the whole suite still passes — the suite imports the source
   tree and never builds it. A test pins the ordering.
+- On the Windows runners, `bash` is the WSL stub: `bash -n` exits **1 with
+  empty stderr** for a valid script. Probe a tool before trusting its exit
+  code — the same lesson as `docker info` exiting 0 with no server version.
+- YAML reads a bare all-digit `sha256:` as a *number* and drops leading
+  zeros, so the value that arrives is not the value written. Quote it.
 
 ### Two things that turned out easier than this file previously claimed
 
