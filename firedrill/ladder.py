@@ -560,15 +560,29 @@ def integrity(container, cfg, database: str,
         ))
         return findings, {}
 
+    # Grouped by sequence, because one sequence can feed many columns -- every
+    # partition of a partitioned table inherits the parent's DEFAULT. Measured
+    # on the real pagila: 13 sequences produced 68 (sequence, column) pairs,
+    # and counting pairs made the report say "68 of 13 sequence(s)", which is
+    # visibly nonsense and was hiding a subtler error. Comparing per pair would
+    # also emit the same finding once per partition.
+    fed: dict[tuple, list] = {}
     for row in _rows(listing):
         if len(row) != 5:
             continue
         seq_schema, seq_name, tbl_schema, tbl_name, column = row
+        fed.setdefault((seq_schema, seq_name), []).append((tbl_schema, tbl_name, column))
+
+    for (seq_schema, seq_name), columns in sorted(fed.items()):
         sequence = f'"{seq_schema}"."{seq_name}"'
-        table = f'"{tbl_schema}"."{tbl_name}"'
+        # The high-water mark across every column this sequence feeds. A
+        # sequence is only behind if it is behind the largest of them.
+        highest = " union all ".join(
+            f'select max("{col}") as v from "{sch}"."{tbl}"'
+            for sch, tbl, col in columns)
         probe = container.sql(
             f'select (select last_value from {sequence}), '
-            f'coalesce((select max("{column}") from {table}), 0)',
+            f'coalesce((select max(v) from ({highest}) x), 0)',
             database=database,
         )
         rows = _rows(probe)
@@ -581,11 +595,13 @@ def integrity(container, cfg, database: str,
 
         checked += 1
         if last_value < max_id:
+            where = ", ".join(f"{s}.{t}.{c}" for s, t, c in columns[:3])
+            if len(columns) > 3:
+                where += f" (+{len(columns) - 3} more)"
             findings.append(Finding(
                 stage="integrity", rule="SEQUENCE_BEHIND", severity="high",
                 message=f"sequence {seq_schema}.{seq_name} is at {last_value}, "
-                        f"behind the largest {tbl_schema}.{tbl_name}.{column} "
-                        f"of {max_id}",
+                        f"behind the largest value of {max_id} in {where}",
                 fix="The restore succeeded and the very first insert after "
                     "failover will raise a duplicate key. Run setval() past the "
                     "maximum before letting traffic in.",
