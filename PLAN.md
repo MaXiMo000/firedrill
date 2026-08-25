@@ -317,7 +317,7 @@ GitHub Action, JUnit and JSON output, `history.json` trends, a scheduled
 workflow template, a PR comment that says *"restored in 4m12s, 0 findings"*.
 *Exit:* a stranger can schedule a nightly restore check in ten lines of YAML.
 
-**Phase 4 — PITR** *(next)*
+**Phase 4 — PITR** *(built)*
 Base backup plus WAL, restore to a timestamp, assert the boundary row. The check
 nobody does.
 *Exit:* proven against a fixture with a known write timeline.
@@ -344,17 +344,20 @@ to `postgresql.conf`.
 satisfiable by a broken restore: restoring everything passes the first, and
 restoring nothing passes the second.
 
-*Known unknowns to measure rather than assume:*
-- Whether recovery reaching its target is distinguishable from recovery
-  *failing* to reach it. `recovery_target_action = promote` ends with a server
-  accepting connections either way, so "the target was reached" needs reading
-  back (`pg_last_wal_replay_lsn`, the log line, or the boundary rows
-  themselves) — otherwise a PITR that silently stopped early reports as a pass.
-- Whether a target timestamp *before* the base backup's own consistency point
-  fails loudly or hangs. It must become a finding, not a timeout.
-- Clock domains. `T` is recorded by the source server; `recovery_target_time` is
-  interpreted by the target's timezone setting. Both should be UTC and it should
-  be asserted, not hoped.
+*Measured, and two of the three guesses above were wrong:*
+- **An unreachable target does not silently promote.** The concern that
+  `recovery_target_action = promote` would leave a server up either way is
+  unfounded: the startup process exits 1 with `FATAL: recovery ended before
+  configured recovery target was reached` and the container stops. "Did it
+  reach the target" therefore needs no heuristic — a server that is up is a
+  server that stopped where it was told.
+- **`recovery_target_time` counts as reached only when a commit with a later
+  timestamp exists in the WAL.** A target after the last commit is *unreached*,
+  not "reached at end of WAL". This is why the fixture writes a third sentinel
+  row: without it, recovering past the boundary produced
+  `PITR_TARGET_UNREACHED` instead of the boundary failure the test is for.
+- Clock domains handled by recording the target as `now() at time zone 'UTC'`
+  on the source and passing it through unchanged.
 
 **Phase 5 — reach**
 MySQL and MongoDB adapters *if and only if* the Postgres one is genuinely solid

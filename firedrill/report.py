@@ -30,7 +30,17 @@ def human(report: Report, colour: bool = False) -> str:
     lines = []
     a = report.archive
     lines.append(f"firedrill  {report.dump}")
-    if a:
+    if a.get("recovery_target_time"):
+        # A PITR run has no archive to describe. Printing the dump fields here
+        # rendered "archive None vNone 0B from None", which is worse than
+        # printing nothing: it looks like a parse that went wrong.
+        lines.append(f"  base      {a.get('base')}")
+        lines.append(f"  wal       {a.get('wal')}")
+        lines.append(
+            f"  target    {a.get('recovery_target_time')} UTC  "
+            f"-> recovered on postgres:{a.get('restored_into_major')}"
+        )
+    elif a:
         lines.append(
             f"  archive   {a.get('format')} v{a.get('archive_version')}  "
             f"{_size(a.get('size_bytes', 0))}  from {a.get('source_dbname')!r}"
@@ -99,6 +109,9 @@ def _verdict(report: Report) -> str:
         # run proved the schema comes back and nothing more.
         return ("PASS (fast tier) -- the schema restored. Whether the DATA is "
                 "there was not checked.")
+    if report.ok and report.stages and report.stages[0].name == "recover":
+        return ("PASS -- recovered to the target, and the boundary is where it "
+                "should be.")
     if report.ok:
         return "PASS -- restored and answered queries."
     return "FAIL -- the restore ran and produced findings above."

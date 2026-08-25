@@ -14,7 +14,7 @@ import shutil
 import tempfile
 import time
 
-from . import archive, docker, history as history_module, ladder, \
+from . import archive, docker, history as history_module, ladder, pitr, \
     restore as restore_stage, sources
 from . import config as _config_module
 from .config import DEFAULT as DEFAULT_CONFIG
@@ -22,6 +22,10 @@ from .finding import DEFAULT_FAIL_ON, Finding, should_fail, worst
 
 STAGES = ("fetch", "inspect", "target", "restore", "smoke",
           "structure", "volume", "semantics", "integrity")
+
+# PITR has its own shape: there is no archive to inspect and no pg_restore
+# to run, and the rung that matters is the boundary assertion.
+PITR_STAGES = ("recover", "boundary", "integrity")
 
 OK = "ok"
 FAILED = "failed"
@@ -129,6 +133,120 @@ def run(dump_path: str | pathlib.Path | None = None, *, cfg=None, **kw) -> Repor
                 evidence="",
             ))
     return report
+
+
+def run_pitr(base, wal, target: str, *, cfg=None, flavour: str = "",
+             fail_on: str = DEFAULT_FAIL_ON,
+             ready_timeout: int = docker.DEFAULT_READY_TIMEOUT) -> Report:
+    """Recover to a timestamp, then put the result through the ladder.
+
+    The boundary assertion -- the pre-target row is there and the post-target
+    row is not -- is expressed as ordinary `semantics:` checks, so this adds a
+    way of producing a database and reuses every rung that already exists.
+    """
+    cfg = cfg if cfg is not None else DEFAULT_CONFIG
+    stages = [Stage(name) for name in PITR_STAGES]
+    report = Report(dump=f"pitr {base} @ {target}", stages=stages, findings=[],
+                    archive={}, fail_on=fail_on, tier=cfg.tier)
+    began = time.monotonic()
+
+    def stage(name):
+        return next(s for s in stages if s.name == name)
+
+    usable, why = docker.docker_available()
+    if not usable:
+        stage("recover").detail = why
+        report.findings.append(Finding(
+            stage="recover", rule="TARGET_UNAVAILABLE", severity="critical",
+            message=f"the recovery could NOT be verified: {why}",
+            fix="Start Docker and run again. Nothing has been proved about this "
+                "base backup.",
+            evidence="",
+        ))
+        report.total_seconds = time.monotonic() - began
+        return _suppress(report, cfg)
+
+    started = time.monotonic()
+    try:
+        report.archive = {"base": str(base), "wal": str(wal),
+                          "recovery_target_time": target,
+                          "server_major": pitr.major_of_base(base)}
+    except archive.ArchiveError as exc:
+        stage("recover").status = FAILED
+        report.findings.append(Finding(
+            stage="recover", rule="PITR_FAILED", severity="critical",
+            message=f"the base backup could not be read: {exc}",
+            fix="Point --base at the directory pg_basebackup produced.",
+            evidence="",
+        ))
+        report.total_seconds = time.monotonic() - began
+        return _suppress(report, cfg)
+
+    container, found = pitr.recover(base, wal, target, flavour=flavour,
+                                    ready_timeout=ready_timeout)
+    stage("recover").seconds = time.monotonic() - started
+    if found:
+        report.findings.extend(found)
+        stage("recover").status = FAILED
+        stage("recover").detail = found[0].rule
+        report.total_seconds = time.monotonic() - began
+        return _suppress(report, cfg)
+
+    try:
+        promoted = pitr.confirm_promoted(container)
+        if promoted:
+            report.findings.extend(promoted)
+            stage("recover").status = FAILED
+            report.total_seconds = time.monotonic() - began
+            return _suppress(report, cfg)
+
+        # It came up out of recovery, so it stopped where it was told to.
+        report.verified = True
+        stage("recover").status = OK
+        stage("recover").detail = f"recovered to {target}"
+        report.archive["restored_into_major"] = _served_major(container)
+
+        if cfg.semantics:
+            started = time.monotonic()
+            sem, _ = ladder.semantics(container, cfg, "postgres")
+            report.findings.extend(sem)
+            stage("boundary").seconds = time.monotonic() - started
+            stage("boundary").status = FAILED if sem else OK
+            stage("boundary").detail = f"{len(cfg.semantics)} check(s)"
+        else:
+            # Without the boundary checks this proves a server came up, which
+            # is not what PITR is for. Not a pass.
+            stage("boundary").status = NOT_CONFIGURED
+            stage("boundary").detail = "no semantics checks: the boundary was not asserted"
+            report.findings.append(Finding(
+                stage="boundary", rule="PITR_UNASSERTED", severity="high",
+                message="recovery reached the target, and nothing checked what "
+                        "the database then contained",
+                fix="Add two semantics checks: one row written before the target "
+                    "that must exist, one written after that must not. Either "
+                    "alone is satisfiable by a restore that is simply wrong.",
+                evidence="",
+            ))
+
+        started = time.monotonic()
+        integ, info = ladder.integrity(container, cfg, "postgres")
+        report.findings.extend(integ)
+        stage("integrity").seconds = time.monotonic() - started
+        stage("integrity").status = FAILED if integ else OK
+        stage("integrity").detail = f"{info.get('sequences', 0)} sequence(s)"
+    finally:
+        container.teardown()
+
+    report.total_seconds = time.monotonic() - began
+    return _suppress(report, cfg)
+
+
+def _served_major(container) -> str | None:
+    served = container.sql("select current_setting('server_version')")
+    try:
+        return archive.major_of(served.stdout.strip())
+    except archive.ArchiveError:
+        return None
 
 
 def _is_older(target: str, source: str) -> bool:

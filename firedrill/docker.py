@@ -129,7 +129,10 @@ class Container:
     def __exit__(self, *exc) -> None:
         self.teardown()
 
-    def start(self) -> None:
+    def _run_argv(self) -> list[str]:
+        """The `docker run` command. A seam, so a subclass can start the same
+        image a different way -- pitr.RecoveryContainer seeds PGDATA from a base
+        backup instead of letting the entrypoint run initdb."""
         args = [
             "docker", "run", "-d",
             "--name", self.name,
@@ -142,7 +145,10 @@ class Container:
         if self.dump is not None:
             args += ["-v", f"{self.dump}:{DUMP_PATH}:ro"]
         args.append(self.image)
+        return args
 
+    def start(self) -> None:
+        args = self._run_argv()
         env = {"PATH": _path(), "POSTGRES_PASSWORD": self.password, "HOME": _home()}
         result = _run(args, env=env)
         if result.returncode != 0:

@@ -1692,6 +1692,103 @@ volume:
         check("20 -> 2000 is silent", [f.rule for f in grown.findings], [])
 
 
+# ---------------------------------------------------------------- pitr -----
+# PLAN.md §9 Phase 4. The fixture's write timeline is the test: the base backup
+# is taken BEFORE any writes, so recovery has to replay WAL to see them at all.
+
+BOUNDARY_CONFIG = """
+version: 1
+semantics:
+  - name: the row written before the target survived
+    sql: select count(*) from events where label = 'before'
+    expect: "== 1"
+  - name: the row written after the target did not
+    sql: select count(*) from events where label = 'after'
+    expect: "== 0"
+"""
+
+
+def _pitr_fixture():
+    """(base, wal, target, late), building it on first use."""
+    root = CORPUS / "pitr"
+    if not (root / "target_late.txt").exists():
+        needs_docker()
+        import make_corpus
+        make_corpus.build_pitr(CORPUS)
+    return (root / "base", root / "wal",
+            (root / "target.txt").read_text(encoding="utf-8").strip(),
+            (root / "target_late.txt").read_text(encoding="utf-8").strip())
+
+
+def test_integration_pitr_stops_where_it_was_told_to():
+    """The check nobody does. Both halves are needed: restoring everything
+    passes the first, restoring nothing passes the second, and only together do
+    they say recovery stopped at the target."""
+    needs_docker()
+    base, wal, target, _ = _pitr_fixture()
+    report = drill.run_pitr(base, wal, target, cfg=config.loads(BOUNDARY_CONFIG))
+    check("clean", [f.rule for f in report.findings], [])
+    check("verified", report.verified, True)
+    check("exit 0", report.exit_code, 0)
+    check("recovered", report.stage("recover").status, drill.OK)
+    check("boundary asserted", report.stage("boundary").status, drill.OK)
+    check("the major came from the base backup's own PG_VERSION",
+          report.archive["server_major"], "16")
+
+
+def test_integration_pitr_boundary_can_actually_fail():
+    """The assertion above is worth nothing unless it can fail. Recovering PAST
+    the boundary must keep the row that should have been dropped."""
+    needs_docker()
+    base, wal, _, late = _pitr_fixture()
+    report = drill.run_pitr(base, wal, late, cfg=config.loads(BOUNDARY_CONFIG))
+    check("caught", [f.rule for f in report.findings], ["SEMANTICS_FAILED"])
+    check("naming the half that failed",
+          "after the target did not" in report.findings[0].message, True)
+    check("non-zero", report.exit_code, 1)
+
+
+def test_integration_pitr_unreachable_target_is_reported():
+    """Measured on PG16: an unreachable target does NOT silently promote. The
+    startup process exits and says so, which is the loud failure we want."""
+    needs_docker()
+    import datetime
+    base, wal, _, _ = _pitr_fixture()
+    future = (datetime.datetime.now(datetime.timezone.utc)
+              + datetime.timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    report = drill.run_pitr(base, wal, future, cfg=config.loads(BOUNDARY_CONFIG))
+    check("rule", [f.rule for f in report.findings], ["PITR_TARGET_UNREACHED"])
+    check("not verified", report.verified, False)
+    check("non-zero", report.exit_code, 1)
+    check("and no boundary result is claimed",
+          report.stage("boundary").status, drill.NOT_RUN)
+
+
+def test_integration_pitr_without_boundary_checks_is_not_a_pass():
+    """A server that came up proves a server came up. PITR is not for that."""
+    needs_docker()
+    base, wal, target, _ = _pitr_fixture()
+    report = drill.run_pitr(base, wal, target, cfg=config.loads("version: 1\n"))
+    check("rule", [f.rule for f in report.findings], ["PITR_UNASSERTED"])
+    check("non-zero even though recovery worked", report.exit_code, 1)
+    check("recovery itself is still reported honestly",
+          report.stage("recover").status, drill.OK)
+
+
+def test_integration_pitr_reads_the_major_from_the_base_backup():
+    needs_docker()
+    from firedrill import pitr as pitr_module
+    base, _, _, _ = _pitr_fixture()
+    check("PG_VERSION", pitr_module.major_of_base(base), "16")
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            pitr_module.major_of_base(pathlib.Path(tmp))
+            FAILURES.append("  a directory with no PG_VERSION should raise")
+        except archive.ArchiveError as exc:
+            check("says what is wrong", "base backup" in str(exc), True)
+
+
 def test_integration_leaves_no_containers_behind():
     needs_docker()
     before = set(docker.orphans())
@@ -1773,7 +1870,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 115
+    FLOOR = 120
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "

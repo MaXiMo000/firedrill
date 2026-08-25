@@ -63,8 +63,41 @@ def build_parser() -> argparse.ArgumentParser:
                           "against the last known-good run recorded there")
     run.add_argument("--quiet", action="store_true", help="suppress the table")
 
+    drill_pitr = sub.add_parser(
+        "pitr",
+        help="recover a base backup to a timestamp and assert the boundary")
+    drill_pitr.add_argument("--base", required=True, metavar="DIR",
+                            help="the directory pg_basebackup produced")
+    drill_pitr.add_argument("--wal", required=True, metavar="DIR",
+                            help="the archived WAL segments")
+    drill_pitr.add_argument("--target", required=True, metavar="TIMESTAMP",
+                            help="recovery target, in UTC, e.g. "
+                                 "'2026-08-25 12:30:16'")
+    drill_pitr.add_argument("--config", metavar="PATH",
+                            help="firedrill.yml holding the boundary checks")
+    drill_pitr.add_argument("--no-config", action="store_true")
+    drill_pitr.add_argument("--fail-on", choices=SEVERITIES, default="high")
+    drill_pitr.add_argument("--image-flavour", default="")
+    drill_pitr.add_argument("--ready-timeout", type=int,
+                            default=docker.DEFAULT_READY_TIMEOUT)
+    drill_pitr.add_argument("--json", metavar="PATH")
+    drill_pitr.add_argument("--junit", metavar="PATH")
+    drill_pitr.add_argument("--quiet", action="store_true")
+
     sub.add_parser("clean", help="remove containers left behind by a crash")
     return parser
+
+
+def _load_config(args):
+    """The config, or a ConfigError. Shared by `run` and `pitr`."""
+    if getattr(args, "no_config", False):
+        return config.DEFAULT
+    if getattr(args, "config", None):
+        return config.load(args.config)
+    found = config.find()
+    if found and not args.quiet:
+        print(f"using {found}")
+    return config.load(found) if found else config.DEFAULT
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -84,15 +117,13 @@ def main(argv: list[str] | None = None) -> int:
     # back to defaults would run a weaker set of checks than the user asked
     # for and still print a pass.
     try:
-        if args.no_config:
-            cfg = config.DEFAULT
-        elif args.config:
-            cfg = config.load(args.config)
-        else:
-            found = config.find()
-            cfg = config.load(found) if found else config.DEFAULT
-            if found and not args.quiet:
-                print(f"using {found}")
+        cfg = _load_config(args)
+        if args.command == "pitr":
+            result = drill.run_pitr(
+                args.base, args.wal, args.target, cfg=cfg,
+                flavour=args.image_flavour, fail_on=args.fail_on,
+                ready_timeout=args.ready_timeout)
+            return _emit(result, args)
         if args.history:
             cfg = dataclasses.replace(cfg, history_path=pathlib.Path(args.history))
         if args.tier:
@@ -116,6 +147,10 @@ def main(argv: list[str] | None = None) -> int:
         ready_timeout=args.ready_timeout,
     )
 
+    return _emit(result, args)
+
+
+def _emit(result, args) -> int:
     if not args.quiet:
         print(reporting.human(result))
     if args.junit:

@@ -17,6 +17,7 @@ arrive with the checks that read them.
 from __future__ import annotations
 
 import pathlib
+import shutil
 import subprocess
 import sys
 import time
@@ -127,6 +128,86 @@ def _variant(src: "Source", dest: pathlib.Path, dbname: str, mutation: str):
     return src.dump(dest, db=dbname)
 
 
+def build_pitr(outdir: pathlib.Path) -> dict:
+    """A base backup plus WAL, with a write timeline we know exactly.
+
+    Order matters and is the whole fixture: the base backup is taken BEFORE the
+    writes, so recovery has to replay WAL to see any of them. Then one row, a
+    recorded timestamp, a gap, and a second row -- so that recovering to that
+    timestamp must keep the first and drop the second. Either half alone is
+    satisfiable by a broken restore.
+    """
+    base_out = outdir / "pitr" / "base"
+    wal_out = outdir / "pitr" / "wal"
+    for path in (base_out, wal_out):
+        if path.exists():
+            shutil.rmtree(path)
+        path.mkdir(parents=True, exist_ok=True)
+
+    major = VERSIONS[0]
+    name = f"firedrill-pitr-{uuid.uuid4().hex[:8]}"
+    sh("docker", "run", "-d", "--name", name, "--label", "firedrill=1",
+       "-e", "POSTGRES_PASSWORD=corpus-only-not-a-secret",
+       "-v", f"{wal_out.resolve()}:/walarchive",
+       f"postgres:{major}",
+       "-c", "wal_level=replica", "-c", "archive_mode=on",
+       "-c", "archive_command=test ! -f /walarchive/%f && cp %p /walarchive/%f")
+    try:
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            if sh("docker", "exec", "-u", "postgres", name,
+                  "pg_isready", "-U", "postgres", "-h", "127.0.0.1", "-q",
+                  check=False).returncode == 0:
+                break
+            time.sleep(0.3)
+        else:
+            raise RuntimeError("pitr source never became ready")
+
+        def psql(sql, tuples_only=False):
+            flag = "-tAc" if tuples_only else "-c"
+            return sh("docker", "exec", "-u", "postgres", name, "psql",
+                      "-U", "postgres", "-v", "ON_ERROR_STOP=1", flag, sql)
+
+        psql("create table events(id serial primary key, label text, "
+             "at timestamptz default now());")
+        # Base FIRST. A base taken after the writes would contain them already,
+        # and the test would pass without replaying a single WAL record.
+        sh("docker", "exec", "-u", "postgres", name,
+           "pg_basebackup", "-U", "postgres", "-D", "/tmp/base", "-X", "stream",
+           "-c", "fast")
+
+        psql("insert into events(label) values ('before');")
+        time.sleep(2)
+        target = psql("select now() at time zone 'UTC'", tuples_only=True).stdout.strip()
+        time.sleep(2)
+        psql("insert into events(label) values ('after');")
+        time.sleep(2)
+        # A second target, AFTER both writes. Recovering to it must keep both
+        # rows -- which is how the boundary assertion is shown to be capable of
+        # failing. A check that cannot fail is decoration.
+        late = psql("select now() at time zone 'UTC'", tuples_only=True).stdout.strip()
+        time.sleep(2)
+        # A third write, purely so `late` is reachable. Measured on PG 16:
+        # recovery_target_time counts as REACHED only when a commit with a later
+        # timestamp is found in the WAL. Without a commit after `late`, recovery
+        # simply runs out of WAL and reports the target as unreached -- which is
+        # a different failure from the one this fixture exists to demonstrate.
+        psql("insert into events(label) values ('sentinel');")
+        # Force the segment holding both writes into the archive, or recovery
+        # has nothing to replay and the fixture silently tests nothing.
+        psql("select pg_switch_wal();")
+        psql("checkpoint;")
+        time.sleep(1)
+
+        sh("docker", "cp", f"{name}:/tmp/base/.", str(base_out))
+    finally:
+        sh("docker", "rm", "-f", "-v", name, check=False)
+
+    (outdir / "pitr" / "target.txt").write_text(target + "\n", encoding="utf-8")
+    (outdir / "pitr" / "target_late.txt").write_text(late + "\n", encoding="utf-8")
+    return {"base": base_out, "wal": wal_out, "target": target, "late": late}
+
+
 def build(outdir: pathlib.Path = DEFAULT_OUT) -> dict:
     outdir.mkdir(parents=True, exist_ok=True)
     HEADERS_OUT.mkdir(parents=True, exist_ok=True)
@@ -224,6 +305,9 @@ def build(outdir: pathlib.Path = DEFAULT_OUT) -> dict:
         path = outdir / f"{label}.dump"
         path.write_bytes(whole[:size])
         made[label] = path
+
+    # -- pitr: a base backup and its WAL, with a known write timeline.
+    made["pitr"] = build_pitr(outdir)["base"]
 
     # -- empty file: zero bytes, which is what a full disk leaves behind.
     empty = outdir / "empty_file.dump"
