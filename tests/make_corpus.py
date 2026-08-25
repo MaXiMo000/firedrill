@@ -146,13 +146,24 @@ def build_pitr(outdir: pathlib.Path) -> dict:
 
     major = VERSIONS[0]
     name = f"firedrill-pitr-{uuid.uuid4().hex[:8]}"
+    # The archive directory lives INSIDE the container and is copied out at the
+    # end, exactly as the base backup is. A bind mount looked simpler and was
+    # not portable: on Linux the host directory is owned by the runner user and
+    # postgres inside the container is a different uid, so every archive_command
+    # failed silently and the segment was never archived. macOS Docker Desktop
+    # makes bind mounts world-writable, which is why it only broke in CI.
     sh("docker", "run", "-d", "--name", name, "--label", "firedrill=1",
        "-e", "POSTGRES_PASSWORD=corpus-only-not-a-secret",
-       "-v", f"{wal_out.resolve()}:/walarchive",
        f"postgres:{major}",
        "-c", "wal_level=replica", "-c", "archive_mode=on",
        "-c", "archive_command=test ! -f /walarchive/%f && cp %p /walarchive/%f")
     try:
+        # Inside the try, so a failure here still tears the container down.
+        # Early archive attempts fail until this exists; the archiver retries,
+        # which is why that is harmless.
+        sh("docker", "exec", "-u", "root", name, "install", "-d", "-o", "postgres",
+           "-g", "postgres", "-m", "700", "/walarchive")
+
         deadline = time.time() + 120
         while time.time() < deadline:
             if sh("docker", "exec", "-u", "postgres", name,
@@ -219,11 +230,17 @@ def build_pitr(outdir: pathlib.Path) -> dict:
                 break
             time.sleep(0.5)
         else:
+            stats = psql("select 'archived='||archived_count||' failed='||"
+                         "failed_count||' last_failure='||"
+                         "coalesce(last_failed_wal,'none')||' '||"
+                         "coalesce(last_failed_time::text,'')",
+                         tuples_only=True).stdout.strip()
             raise RuntimeError(
                 f"WAL segment {switched} was never archived; the fixture would "
-                "have tested nothing")
+                f"have tested nothing. pg_stat_archiver: {stats}")
 
         sh("docker", "cp", f"{name}:/tmp/base/.", str(base_out))
+        sh("docker", "cp", f"{name}:/walarchive/.", str(wal_out))
     finally:
         sh("docker", "rm", "-f", "-v", name, check=False)
 
