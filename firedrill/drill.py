@@ -328,7 +328,8 @@ def _run(dump_path: str | pathlib.Path | None = None, *, flavour: str = "",
         stage("target").detail = container.image
 
         # -- restore -------------------------------------------------------
-        result = restore_stage.run_restore(container, tier=cfg.tier)
+        result = restore_stage.run_restore(container, tier=cfg.tier,
+                                           tables=cfg.sample_tables)
         report.findings.extend(result.findings)
         stage("restore").seconds = result.seconds
         stage("restore").status = OK if result.exit_code == 0 else FAILED
@@ -405,9 +406,13 @@ def _run(dump_path: str | pathlib.Path | None = None, *, flavour: str = "",
             stage("volume").detail = "no volume rules in the config"
 
         # -- semantics -----------------------------------------------------
-        if cfg.tier == "fast":
+        if cfg.tier in ("fast", "sample"):
+            # sample cannot run these either: a smoke query is arbitrary SQL,
+            # so there is no telling whether it reads a table whose rows were
+            # restored. config.py refuses the combination outright; this is the
+            # belt to that pair of braces.
             stage("semantics").status = NOT_RUN
-            stage("semantics").detail = "fast tier restored no rows"
+            stage("semantics").detail = f"{cfg.tier} tier: not all rows restored"
         elif cfg.semantics:
             started = time.monotonic()
             found, info = ladder.semantics(container, cfg, restore_stage.TARGET_DB)
@@ -423,16 +428,25 @@ def _run(dump_path: str | pathlib.Path | None = None, *, flavour: str = "",
         # This one needs no configuration: the questions it asks are the same
         # for every database, so it always runs.
         started = time.monotonic()
+        # Measured: `pg_restore --data-only -t customer` restores the rows and
+        # leaves the sequence at 1, so a sample run would report SEQUENCE_BEHIND
+        # on a perfectly good backup. That finding would be about firedrill's
+        # sampling, not about the backup, which makes it a false positive of the
+        # most damaging kind -- so sequences are not checked in either tier.
         found, info = ladder.integrity(container, cfg, restore_stage.TARGET_DB,
-                                       sequences=cfg.tier != "fast")
+                                       sequences=cfg.tier == "full")
         report.findings.extend(found)
         stage("integrity").seconds = time.monotonic() - started
         stage("integrity").status = FAILED if found else OK
+        # Collation is a catalog fact and survives either partial restore. The
+        # reason sequences are skipped differs by tier, and saying "needs rows"
+        # for a sample run would be wrong: the rows are there, the setval is
+        # not, because it is not part of a -t data restore.
         stage("integrity").detail = (
-            f"{info.get('sequences', 0)} sequence(s)" if cfg.tier != "fast"
-            # Collation is a catalog fact and survives a schema-only restore;
-            # a sequence's position does not, because setval lives in the data.
-            else "collation only -- sequences need rows")
+            f"{info.get('sequences', 0)} sequence(s)" if cfg.tier == "full"
+            else "collation only -- fast tier restored no rows"
+            if cfg.tier == "fast"
+            else "collation only -- a sampled restore does not carry setval")
     finally:
         # PLAN.md §7: teardown in a finally, always.
         container.teardown()

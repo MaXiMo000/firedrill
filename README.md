@@ -118,6 +118,34 @@ Three properties worth stating plainly:
   every report, log line and finding, and plain `http` to a non-local host is
   refused outright rather than putting a working one on the wire.
 
+## Tiers: how much to restore
+
+A 2 TB restore cannot run on every commit.
+
+| tier | restores | what does NOT run |
+|---|---|---|
+| `full` | everything | — |
+| `fast` | schema only | row counts, smoke queries, sequence checks |
+| `sample` | schema + rows for named tables | smoke queries, sequence checks |
+
+```yaml
+version: 1
+tier: sample
+sample:
+  tables: [orders, customer]
+```
+
+The report always says which tier ran, in capitals when it is not `full`, and
+a partial pass gets its own sentence — `PASS (fast tier) — the schema
+restored. Whether the DATA is there was not checked.` A pass from a
+schema-only run must never look like a pass from a full one.
+
+The rungs a tier cannot honour report **NOT RUN**, never a tick, and the
+config refuses combinations that would produce a misleading finding rather
+than running them: `tier: sample` with a `volume` rule on an unsampled table,
+or with `semantics` at all — a smoke query is arbitrary SQL, so there is no
+knowing whether it reads a table whose rows came back.
+
 ## The ladder, and `firedrill.yml`
 
 A bare `firedrill run` proves the backup restores and answers queries. To prove

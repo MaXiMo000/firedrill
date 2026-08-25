@@ -556,8 +556,9 @@ def test_config_unimplemented_tier_is_refused_not_silently_upgraded():
     refused by name rather than quietly promoted to something that does run."""
     check("fast is implemented and loads", config.loads(
         "version: 1\ntier: fast\n").tier, "fast")
-    _rejects("sample", "version: 1\ntier: sample\n", "not implemented yet")
     _rejects("nonsense", "version: 1\ntier: turbo\n", "must be one of")
+    check("sample is implemented and loads", config.loads(
+        "version: 1\ntier: sample\nsample:\n  tables: [t]\n").tier, "sample")
 
 
 def test_config_dsn_target_is_refused_until_its_interlocks_exist():
@@ -1136,7 +1137,9 @@ def test_integration_fast_tier_still_restores_the_schema():
               report.stage("structure").status, drill.OK)
         check("collation still ran", report.stage("integrity").status, drill.OK)
         check("and said sequences were not part of it",
-              "sequences need rows" in report.stage("integrity").detail, True)
+              "collation only" in report.stage("integrity").detail, True)
+        check("naming the reason specific to this tier",
+              "restored no rows" in report.stage("integrity").detail, True)
         check("no findings", [f.rule for f in report.findings], [])
 
 
@@ -1343,6 +1346,73 @@ def test_a_dump_path_and_a_configured_source_is_refused():
     check("nothing ran", report.verified, False)
 
 
+SAMPLE_CONFIG = """
+version: 1
+tier: sample
+sample:
+  tables: [customer]
+volume:
+  tables:
+    customer: {min_rows: 1000}
+"""
+
+
+def test_integration_sample_tier_restores_the_rows_it_names():
+    """Not a fast run wearing a different word: the sampled table's rows must
+    really be there, or the volume rung would be checking nothing."""
+    needs_docker()
+    cfg = config.loads(SAMPLE_CONFIG)
+    healthy = drill.run(corpus("healthy_pg16.dump"), cfg=cfg)
+    check("healthy is clean", [f.rule for f in healthy.findings], [])
+    check("volume genuinely ran", healthy.stage("volume").status, drill.OK)
+
+    dropped = drill.run(corpus("volume_drop.dump"), cfg=cfg)
+    check("and a real row loss is still caught",
+          [f.rule for f in dropped.findings], ["VOLUME_BELOW_MINIMUM"])
+
+
+def test_integration_sample_tier_does_not_invent_a_sequence_failure():
+    """Measured: `pg_restore --data-only -t customer` restores 2000 rows and
+    leaves the sequence at 1. Checking sequences here would report
+    SEQUENCE_BEHIND on a perfectly good backup -- a finding about firedrill's
+    own sampling rather than about the backup, which is the most damaging kind
+    of false positive there is."""
+    needs_docker()
+    report = drill.run(corpus("healthy_pg16.dump"), cfg=config.loads(SAMPLE_CONFIG))
+    check("no invented finding", "SEQUENCE_BEHIND" in
+          {f.rule for f in report.findings}, False)
+    check("and the report says why, accurately",
+          "does not carry setval" in report.stage("integrity").detail, True)
+    check("a full run does check sequences",
+          "sequence(s)" in drill.run(
+              corpus("healthy_pg16.dump")).stage("integrity").detail, True)
+
+
+def test_config_sample_tier_refuses_checks_it_cannot_honour():
+    """Each of these would produce a finding about the sampling rather than
+    about the backup, so the config refuses them instead of running them."""
+    _rejects("no tables", "version: 1\ntier: sample\n", "needs `sample.tables`")
+    _rejects("sample set on the wrong tier",
+             "version: 1\nsample:\n  tables: [a]\n", "would never be read")
+    _rejects("volume rule on an unsampled table", """
+version: 1
+tier: sample
+sample:
+  tables: [customer]
+volume:
+  tables:
+    orders: {min_rows: 1}
+""", "artefact of sampling")
+    _rejects("semantics", """
+version: 1
+tier: sample
+sample:
+  tables: [customer]
+semantics:
+  - {name: x, sql: select count(*) from t, expect: "> 0"}
+""", "cannot run semantics")
+
+
 def test_integration_leaves_no_containers_behind():
     needs_docker()
     before = set(docker.orphans())
@@ -1424,7 +1494,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 99
+    FLOOR = 102
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "

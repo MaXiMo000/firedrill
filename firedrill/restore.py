@@ -187,7 +187,17 @@ def parse_stderr(stderr: str, exit_code: int) -> tuple[list[Finding], int]:
     return findings, errors_ignored
 
 
-def run_restore(container, jobs: int = 1, tier: str = "full") -> RestoreResult:
+class _Combined:
+    """The outcome of several pg_restore passes, read as one."""
+
+    def __init__(self, returncode: int, stderr: str):
+        self.returncode = returncode
+        self.stderr = stderr
+        self.stdout = ""
+
+
+def run_restore(container, jobs: int = 1, tier: str = "full",
+                tables=()) -> RestoreResult:
     """Restore the mounted archive inside the container, and time it.
 
     `tier` is "full" or "fast". A fast run passes --schema-only, which
@@ -212,15 +222,28 @@ def run_restore(container, jobs: int = 1, tier: str = "full") -> RestoreResult:
             )],
         )
 
-    argv = ["pg_restore", "-U", "postgres", "-d", TARGET_DB, "--no-password"]
-    if tier == "fast":
-        argv.append("--schema-only")
+    base = ["pg_restore", "-U", "postgres", "-d", TARGET_DB, "--no-password"]
     if jobs > 1:
-        argv += ["-j", str(jobs)]
-    argv.append(DUMP_PATH)
+        base += ["-j", str(jobs)]
 
     start = time.monotonic()
-    result = container.exec(argv)
+    if tier == "sample":
+        # Two passes: every object, then rows for the named tables only. A
+        # single pass cannot express "all the schema, some of the data".
+        result = container.exec(base + ["--schema-only", DUMP_PATH])
+        stderr = result.stderr or ""
+        worst_code = result.returncode
+        for table in tables or ():
+            data = container.exec(base + ["--data-only", "-t", table, DUMP_PATH])
+            stderr += data.stderr or ""
+            worst_code = worst_code or data.returncode
+        result = _Combined(worst_code, stderr)
+    else:
+        argv = list(base)
+        if tier == "fast":
+            argv.append("--schema-only")
+        argv.append(DUMP_PATH)
+        result = container.exec(argv)
     seconds = time.monotonic() - start
 
     findings, errors_ignored = parse_stderr(result.stderr or "", result.returncode)

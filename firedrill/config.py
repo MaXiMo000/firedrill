@@ -47,7 +47,7 @@ _NO_TOLERANCE_YET = (
 # The only tier implemented. fast/sample are PLAN.md §9 Phase 2; accepting
 # either now would run a full restore and report the tier the user asked for,
 # which is a lie about what was verified.
-IMPLEMENTED_TIERS = ("full", "fast")
+IMPLEMENTED_TIERS = ("full", "fast", "sample")
 ALL_TIERS = ("fast", "sample", "full")
 
 _EXPECT = re.compile(r"^\s*(==|!=|>=|<=|>|<)\s*(-?\d+)\s*$")
@@ -170,6 +170,7 @@ class Config:
     structure_reference: pathlib.Path | None = None
     volume_tolerance: float | None = None
     volume_tables: dict = dataclasses.field(default_factory=dict)
+    sample_tables: tuple = ()
     semantics: tuple = ()
     ignore: dict = dataclasses.field(default_factory=dict)
     source: Source | None = None
@@ -185,7 +186,7 @@ class Config:
 DEFAULT = Config()
 
 _TOP = ("version", "source", "target", "tier", "rto_budget", "structure",
-        "volume", "semantics", "ignore")
+        "volume", "semantics", "sample", "ignore")
 
 _SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 
@@ -284,8 +285,49 @@ def loads(text: str, path: pathlib.Path | None = None) -> Config:
                 _NO_TOLERANCE_YET.format(where=f"volume.tables.{name}.tolerance"))
         volume_tables[str(name)] = VolumeRule(min_rows=min_rows)
 
+    # -- sample ------------------------------------------------------------
+    sample = _require_mapping(raw.get("sample"), "sample")
+    _reject_unknown(sample, ("tables",), "sample")
+    sample_tables = tuple(str(name) for name in (sample.get("tables") or ()))
+
+    if tier == "sample" and not sample_tables:
+        raise ConfigError(
+            "tier: sample needs `sample.tables`, the tables whose rows should "
+            "be restored. Without them it would restore no data at all, which "
+            "is `tier: fast` under a name that suggests otherwise."
+        )
+    if sample and tier != "sample":
+        raise ConfigError(
+            f"`sample:` is set but tier is {tier!r}, so it would never be read. "
+            "A setting that has no effect is the silent skip this loader exists "
+            "to prevent."
+        )
+    for name in sample_tables:
+        if not _IDENT.match(name):
+            raise ConfigError(
+                f"sample.tables entry {name!r} is not a plain table name")
+
+    if tier == "sample":
+        unsampled = sorted(set(volume_tables) - set(sample_tables))
+        if unsampled:
+            raise ConfigError(
+                f"volume rules name table(s) whose rows this tier does not "
+                f"restore: {', '.join(unsampled)}. They would count zero and "
+                "report a loss that is an artefact of sampling, not of the "
+                "backup. Add them to sample.tables or drop the rule."
+            )
+
     # -- semantics ---------------------------------------------------------
     semantics = _parse_semantics(raw.get("semantics"))
+
+    if tier == "sample" and semantics:
+        raise ConfigError(
+            "tier: sample cannot run semantics checks. A smoke query is "
+            "arbitrary SQL, so there is no way to know which tables it reads; "
+            "against an unsampled table it would return zero and report a "
+            "failure that says nothing about the backup. Use tier: full for "
+            "semantics, or remove them."
+        )
 
     # -- ignore ------------------------------------------------------------
     ignore = _parse_ignore(raw.get("ignore"))
@@ -298,6 +340,7 @@ def loads(text: str, path: pathlib.Path | None = None) -> Config:
         structure_reference=structure_reference,
         volume_tolerance=volume_tolerance,
         volume_tables=volume_tables,
+        sample_tables=sample_tables,
         semantics=tuple(semantics),
         ignore=ignore,
         path=path,
