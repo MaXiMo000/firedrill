@@ -2179,6 +2179,36 @@ def test_directory_dump_refuses_a_checksum_it_cannot_compute():
             check("explains why", "no single digest" in str(exc), True)
 
 
+def test_the_step_that_reads_the_backup_runs_as_root():
+    """Structural, because the failure it prevents cannot be reproduced on
+    macOS: Docker Desktop ignores ownership on bind mounts, so a dump the
+    container's postgres uid cannot read still works there.
+
+    On Linux it does not. `pg_dump -Fd` writes its directory mode 700 and a
+    -Fc file is commonly 600, owned by whoever ran it -- a different uid from
+    postgres inside the container. Measured on a CI runner: a directory dump
+    restored ZERO tables. pg_restore is a client, so it runs as root and can
+    read the mount whatever its ownership.
+    """
+    source = (HERE.parent / "firedrill" / "restore.py").read_text(encoding="utf-8")
+    calls = re.findall(r"container\.exec\((.*?)\)", source, re.S)
+    # Every pg_restore invocation reads the mount, whether the path is spelled
+    # inline or already inside the argv list it was appended to.
+    restoring = [c for c in calls
+                 if "DUMP_PATH" in c or c.strip().startswith(("base", "argv"))]
+    check("the restore reads the dump", len(restoring) >= 3, True)
+    for call in restoring:
+        check("every pg_restore call runs as root", 'user="root"' in call, True)
+
+    # And the reverse: createdb does not touch the mount, so it is not escalated.
+    escalated_others = [c for c in calls
+                        if c not in restoring and 'user="root"' in c]
+    check(f"nothing else runs as root (found: {escalated_others})",
+          escalated_others, [])
+    check("createdb still runs as postgres",
+          any("createdb" in c and "root" not in c for c in calls), True)
+
+
 def test_integration_leaves_no_containers_behind():
     needs_docker()
     before = set(docker.orphans())
@@ -2260,7 +2290,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 135
+    FLOOR = 136
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "

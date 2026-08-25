@@ -230,11 +230,12 @@ def run_restore(container, jobs: int = 1, tier: str = "full",
     if tier == "sample":
         # Two passes: every object, then rows for the named tables only. A
         # single pass cannot express "all the schema, some of the data".
-        result = container.exec(base + ["--schema-only", DUMP_PATH])
+        result = container.exec(base + ["--schema-only", DUMP_PATH], user="root")
         stderr = result.stderr or ""
         worst_code = result.returncode
         for table in tables or ():
-            data = container.exec(base + ["--data-only", "-t", table, DUMP_PATH])
+            data = container.exec(base + ["--data-only", "-t", table, DUMP_PATH],
+                                  user="root")
             stderr += data.stderr or ""
             worst_code = worst_code or data.returncode
         result = _Combined(worst_code, stderr)
@@ -243,7 +244,9 @@ def run_restore(container, jobs: int = 1, tier: str = "full",
         if tier == "fast":
             argv.append("--schema-only")
         argv.append(DUMP_PATH)
-        result = container.exec(argv)
+        # As root: it is the step that reads the mounted backup, and the
+        # postgres uid inside frequently cannot.
+        result = container.exec(argv, user="root")
     seconds = time.monotonic() - start
 
     findings, errors_ignored = parse_stderr(result.stderr or "", result.returncode)

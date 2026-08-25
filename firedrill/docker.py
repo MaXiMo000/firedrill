@@ -205,9 +205,22 @@ class Container:
 
     # -- use ---------------------------------------------------------------
 
-    def exec(self, argv: list[str], timeout: int = 3600):
-        """Run a command inside the container as the postgres user."""
-        return _run(["docker", "exec", "-u", "postgres", self.name, *argv],
+    def exec(self, argv: list[str], timeout: int = 3600, user: str = "postgres"):
+        """Run a command inside the container, as postgres unless told otherwise.
+
+        `user="root"` exists for one reason: reading the mounted dump. pg_dump
+        writes a -Fd directory with mode 700, and a -Fc file is often 600, both
+        owned by whoever ran it. The postgres user inside this container is a
+        different uid, so on Linux it frequently cannot read the backup at all
+        -- measured: a directory dump restored ZERO tables on a CI runner while
+        working on macOS, where Docker Desktop's file sharing hides the
+        mismatch.
+
+        Only the client that reads the mount runs as root. It is a client, not
+        the server; the container is disposable, has no published port, and the
+        mount is read-only.
+        """
+        return _run(["docker", "exec", "-u", user, self.name, *argv],
                     timeout=timeout)
 
     def sql(self, statement: str, database: str = "postgres", timeout: int = 300):
