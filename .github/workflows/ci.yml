@@ -101,6 +101,76 @@ jobs:
             echo "exited 0 on an unverifiable backup"; exit 1
           fi
 
+  action:
+    # The action shipped in this repo, run against this repo. It was written
+    # in Phase 3 and had never executed -- and an action nobody has run is the
+    # same unverified control this whole tool exists to complain about.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Build a corpus for it to chew on
+        run: |
+          python -m pip install --disable-pip-version-check -e ".[s3]"
+          python tests/make_corpus.py /tmp/corpus
+
+      - name: A healthy backup passes
+        id: healthy
+        uses: ./
+        with:
+          install-from: .
+          dump: /tmp/corpus/healthy_pg16.dump
+          history: /tmp/history.json
+
+      - name: And the outputs say so
+        run: |
+          set -euo pipefail
+          test "${{ steps.healthy.outputs.ok }}" = "true"
+          test "${{ steps.healthy.outputs.verified }}" = "true"
+          test "${{ steps.healthy.outputs.findings }}" = "0"
+          echo "summary was: ${{ steps.healthy.outputs.summary }}"
+          case "${{ steps.healthy.outputs.summary }}" in
+            "restored in "*", 0 findings") ;;
+            *) echo "unexpected summary"; exit 1 ;;
+          esac
+          test -f firedrill-junit.xml
+          test -f firedrill-report.json
+
+      - name: A broken backup fails the build
+        id: broken
+        continue-on-error: true
+        uses: ./
+        with:
+          install-from: .
+          dump: /tmp/corpus/truncated_data.dump
+
+      - name: The inverse, which matters exactly as much
+        run: |
+          set -euo pipefail
+          test "${{ steps.broken.outcome }}" = "failure"
+          test "${{ steps.broken.outputs.ok }}" = "false"
+
+      - name: An unverifiable backup also fails, and says which
+        id: unverifiable
+        continue-on-error: true
+        uses: ./
+        with:
+          install-from: .
+          dump: /tmp/corpus/truncated_header.dump
+
+      - name: "'could not verify' is never quieter than 'verified and fine'"
+        run: |
+          set -euo pipefail
+          test "${{ steps.unverifiable.outcome }}" = "failure"
+          test "${{ steps.unverifiable.outputs.verified }}" = "false"
+          case "${{ steps.unverifiable.outputs.summary }}" in
+            "COULD NOT VERIFY"*) ;;
+            *) echo "summary did not distinguish unverified from failed"; exit 1 ;;
+          esac
+
   package:
     # Build and install on every commit, not only at release. A packaging break
     # that only surfaces during a release is a break discovered at the worst time.

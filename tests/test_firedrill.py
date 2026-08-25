@@ -651,6 +651,56 @@ def test_action_yml_passes_only_flags_the_cli_actually_has():
     check(f"every flag exists in `firedrill run` (missing: {missing})", missing, [])
 
 
+def test_action_shell_scripts_are_valid_bash():
+    """A syntax error in a composite action is discovered by whoever runs it,
+    in their CI, not ours -- unless it is checked here.
+
+    This also pins the heredoc inside it: `<<'PY'` needs its terminator at
+    column zero, and YAML block-scalar stripping is what decides whether it
+    lands there. Re-indenting the surrounding block would silently break it.
+    """
+    import shutil
+    import yaml as yaml_module
+    if shutil.which("bash") is None:
+        raise Skip("bash is not available on this platform")
+
+    action = yaml_module.safe_load(
+        (HERE.parent / "action.yml").read_text(encoding="utf-8"))
+    steps = [s for s in action["runs"]["steps"] if s.get("shell") == "bash"]
+    check("the action has bash steps", len(steps) >= 3, True)
+    for step in steps:
+        # GitHub expressions are not bash; substitute a literal so the shell
+        # sees the shape of the script rather than the templating.
+        import re
+        script = re.sub(r"\$\{\{[^}]*\}\}", "x", step["run"])
+        result = subprocess.run(["bash", "-n"], input=script,
+                                capture_output=True, text=True)
+        check(f"{step.get('name', '?')!r} parses",
+              (result.returncode, result.stderr.strip()), (0, ""))
+
+    drill_step = [s for s in steps if s.get("id") == "drill"][0]
+    terminators = [l for l in drill_step["run"].splitlines() if l.strip() == "PY"]
+    check("the heredoc terminator survives at column 0",
+          terminators and terminators[0] == "PY", True)
+
+
+def test_ci_exercises_the_action_it_ships():
+    """Phase 0's CI workflows sat unrun until something was pushed, and the
+    first execution found a real bug. The action is the same kind of artefact,
+    so the workflow that runs it is pinned here rather than hoped for."""
+    import yaml as yaml_module
+    ci = yaml_module.safe_load(
+        (HERE.parent / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    check("there is a job for it", "action" in ci["jobs"], True)
+    steps = ci["jobs"]["action"]["steps"]
+    uses_local = [s for s in steps if s.get("uses") == "./"]
+    check("it runs the action from this checkout", len(uses_local) >= 3, True)
+    check("including a healthy backup", any(
+        "healthy" in str(s.get("with", {}).get("dump", "")) for s in uses_local), True)
+    check("and a broken one, which matters exactly as much", any(
+        "truncated" in str(s.get("with", {}).get("dump", "")) for s in uses_local), True)
+
+
 def test_example_workflows_parse_and_pin_their_intent():
     """They are the phase's deliverable -- a stranger copies these."""
     import yaml as yaml_module
@@ -1677,7 +1727,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 111
+    FLOOR = 113
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "

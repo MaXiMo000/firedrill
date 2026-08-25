@@ -47,6 +47,13 @@ inputs:
     description: Version of firedrill to install (a PyPI specifier).
     required: false
     default: ""
+  install-from:
+    description: >-
+      Install from this path instead of PyPI. Exists so this action can be
+      tested against its own checkout -- an action nobody has ever run is
+      exactly the kind of unverified control this tool is about.
+    required: false
+    default: ""
 
 outputs:
   ok:
@@ -72,8 +79,13 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        python3 -m pip install --disable-pip-version-check --quiet \
-          "firedrill${{ inputs.version && format('=={0}', inputs.version) || '' }}[s3]"
+        if [ -n "${{ inputs.install-from }}" ]; then
+          python3 -m pip install --disable-pip-version-check --quiet \
+            "${{ inputs.install-from }}[s3]"
+        else
+          python3 -m pip install --disable-pip-version-check --quiet \
+            "firedrill${{ inputs.version && format('=={0}', inputs.version) || '' }}[s3]"
+        fi
 
     - name: Restore the backup and report
       id: drill
