@@ -1727,6 +1727,12 @@ def test_integration_pitr_stops_where_it_was_told_to():
     needs_docker()
     base, wal, target, _ = _pitr_fixture()
     report = drill.run_pitr(base, wal, target, cfg=config.loads(BOUNDARY_CONFIG))
+    if report.findings:
+        # Printed, not just asserted: when this fails on a machine that is not
+        # in front of you, the recovery trace is the whole diagnosis.
+        print(f"\n  PITR target was {target!r}; recovery said:")
+        for f in report.findings:
+            print(f"    {f.rule}\n      " + f.evidence.replace("\n", "\n      "))
     check("clean", [f.rule for f in report.findings], [])
     check("verified", report.verified, True)
     check("exit 0", report.exit_code, 0)

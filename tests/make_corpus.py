@@ -347,8 +347,9 @@ def build(outdir: pathlib.Path = DEFAULT_OUT) -> dict:
         path.write_bytes(whole[:size])
         made[label] = path
 
-    # -- pitr: a base backup and its WAL, with a known write timeline.
-    made["pitr"] = build_pitr(outdir)["base"]
+    # -- pitr is NOT built here. It needs its own server with archiving on,
+    # and the test suite builds it on first use. Building it from both places
+    # meant rmtree-ing and regenerating a fixture other tests had already read.
 
     # -- empty file: zero bytes, which is what a full disk leaves behind.
     empty = outdir / "empty_file.dump"

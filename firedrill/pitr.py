@@ -131,7 +131,9 @@ def recover(base, wal, target: str, *, flavour: str = "",
                     "moment. Either segments are missing from the archive, or the "
                     "target is later than anything that was archived. This is the "
                     "failure you would meet during the incident, discovered now.",
-                evidence=_TARGET_UNREACHED,
+                # Where it actually stopped, which is the first thing anyone
+                # asks and the last thing a bare "unreached" tells them.
+                evidence=_recovery_trace(logs),
             )]
         return None, [Finding(
             stage="recover", rule="PITR_FAILED", severity="critical",
@@ -171,6 +173,20 @@ def confirm_promoted(container) -> list[Finding]:
             evidence="",
         )]
     return []
+
+
+# The lines that say how far recovery got. Postgres reports the last completed
+# transaction time and any restore_command failures, which together distinguish
+# "the archive is short" from "the archive is unreadable".
+_TRACE = re.compile(
+    r"(last completed transaction|redo done|recovery stopping|restored log file|"
+    r"could not|invalid|FATAL|starting point-in-time recovery|consistent recovery)",
+    re.I)
+
+
+def _recovery_trace(logs: str, keep: int = 12) -> str:
+    lines = [l.strip() for l in logs.splitlines() if _TRACE.search(l)]
+    return "\n".join(lines[-keep:]) if lines else logs.strip()[-600:]
 
 
 def _last_error(logs: str) -> str:
