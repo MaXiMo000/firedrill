@@ -391,6 +391,26 @@ muted DR tool still looks like coverage.
 it (Windows, where Linux containers cannot run) those tests skip *by name* and
 the count is printed, so "it passed" and "it did not run" never look alike.
 
+`python tests/field_test.py` restores pagila, chinook and northwind — real
+databases this project did not write. Worth running after changing any check:
+the corpus is synthetic, so it can only find the cases its author thought of.
+
+### Cutting a release
+
+```bash
+# pyproject.toml is the single source of truth; release.yml fails if the
+# tag and the declared version disagree.
+python tests/test_firedrill.py --require-integration
+git commit -am "Release vX.Y.Z" && git tag -a vX.Y.Z -m "firedrill vX.Y.Z"
+git push origin main --follow-tags
+git tag -f v0 vX.Y.Z && git push -f origin v0      # the moving major tag
+```
+
+The tag runs `verify` → `github-release` → `image` (GHCR, with provenance) →
+`pypi` (Trusted Publishing over OIDC — there is no API token in this repo and
+there must never be one). The `pypi` job waits for a reviewer, and a published
+version number can never be reused, so let the gate do its job.
+
 ## Licence
 
 MIT.

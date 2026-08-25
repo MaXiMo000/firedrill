@@ -470,4 +470,29 @@ reasonably have assumed.
   not-null column drift on pg18. One reference is now portable across majors,
   and a test asserts it.
 
+### What the first release cost
+
+`release.yml` was written in Phase 0 and not executed until 0.1.0 was tagged,
+months of work later. It failed three times, and the third failure was the
+valuable one.
+
+- **`verify` never installed the package.** Written when firedrill was
+  stdlib-only. PyYAML arrived in Phase 1 and `ci.yml` learned about it;
+  `release.yml` never did, because nothing had ever tagged.
+- **The `image` job asked for two platforms and never set up buildx.**
+  *"Multi-platform build is not supported for the docker driver"* — a message
+  that appears only once a release is already half-published.
+- **A real bug in firedrill, caught by the release gate.** `pg_isready`
+  succeeds *during* archive recovery: Postgres accepts read-only connections
+  as soon as it reaches consistency. The PITR promotion check was reading a
+  lucky moment rather than waiting for one, and it passed locally every time.
+
+**Tag early.** A release pipeline is the least-exercised code in a repository
+and the worst place to discover that. Moving the tag between attempts was only
+safe because nothing had published yet; after the first successful upload,
+that option is gone.
+
+Since then the `published` job in `ci.yml` installs from PyPI and runs the
+published action tag weekly, so "what we shipped still works" is measured
+rather than assumed.
 
