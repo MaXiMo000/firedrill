@@ -1940,6 +1940,38 @@ def test_integration_structure_covers_more_than_tables():
             check(f"and {kind} is named in the evidence", kind in evidence, True)
 
 
+def test_integration_not_valid_constraint_is_caught():
+    """A CHECK or FOREIGN KEY added NOT VALID is in the catalog, enforced for
+    new rows only, and was never checked against the rows already there.
+    Measured: NOT VALID survives a dump/restore, so a reference that says
+    validated and a restore that does not is a database enforcing less than
+    the reference claims -- while looking identical."""
+    needs_docker()
+    import make_corpus
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        with make_corpus.Source(make_corpus.VERSIONS[0]) as src:
+            for db, suffix in (("enforced", ""), ("unenforced", " not valid")):
+                src.psql(f"create database {db};")
+                src.psql("create table t(id int, v int);", db=db)
+                src.psql(f"alter table t add constraint v_pos check (v > 0){suffix};",
+                         db=db)
+            good = src.dump(pathlib.Path(tmp) / "enforced.dump", db="enforced")
+            bad = src.dump(pathlib.Path(tmp) / "unenforced.dump", db="unenforced")
+
+        ref = pathlib.Path(tmp) / "ref.txt"
+        drill.run(good, write_reference=ref)
+        cfg = config.loads(f"version: 1\nstructure:\n  reference: {ref}\n")
+
+        check("the enforced original is silent",
+              [f.rule for f in drill.run(good, cfg=cfg).findings], [])
+        report = drill.run(bad, cfg=cfg)
+        check("NOT VALID is caught", "STRUCTURE_MISSING" in
+              {f.rule for f in report.findings}, True)
+        check("and the evidence names it",
+              any("NOT VALID" in f.evidence for f in report.findings), True)
+
+
 def test_integration_row_security_switched_off_is_caught():
     """The subtle half: every policy still present, and row security disabled.
     The table is then wide open and the catalog otherwise looks identical."""
@@ -2084,7 +2116,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 127
+    FLOOR = 128
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "

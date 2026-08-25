@@ -62,7 +62,14 @@ join pg_class c on c.oid = i.indrelid
 join pg_namespace n on n.oid = c.relnamespace
 where n.nspname !~ '^pg_' and n.nspname <> 'information_schema'
 union all
-select 'constraint', n.nspname||'.'||c.relname||'.'||con.conname, con.contype::text
+-- convalidated is part of the identity, not decoration. A CHECK or FOREIGN KEY
+-- added NOT VALID exists in the catalog, is enforced for new rows only, and
+-- was never checked against the rows already there. Measured: NOT VALID
+-- survives a dump/restore intact, so a reference that says validated and a
+-- restore that says otherwise is a real difference -- the restored database
+-- enforces less than the reference claims, and looks identical doing it.
+select 'constraint', n.nspname||'.'||c.relname||'.'||con.conname,
+       con.contype::text || case when con.convalidated then '' else ' NOT VALID' end
 from pg_constraint con
 join pg_class c on c.oid = con.conrelid
 join pg_namespace n on n.oid = c.relnamespace
