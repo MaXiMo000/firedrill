@@ -374,9 +374,34 @@ def _run(dump_path: str | pathlib.Path | None = None, *, flavour: str = "",
     report.dump = artifact.origin
     stage("fetch").status = OK
     stage("fetch").seconds = artifact.fetch_seconds
-    stage("fetch").detail = (
-        f"{artifact.size:,} bytes from {source.type}"
-        + ("  sha256 verified" if source.sha256 else ""))
+    checked = ("sha256 verified" if source.sha256
+               else "size verified" if source.size is not None
+               else "unverified")
+    stage("fetch").detail = f"{artifact.size:,} bytes from {source.type}  {checked}"
+
+    # A remote artefact nobody checked is a restore of whatever was at the far
+    # end, not of the backup the job wrote. For `local` the operator handed us
+    # a specific file and a digest of it proves nothing they do not already
+    # know; for `https` and `s3` the bytes travelled, and for s3 firedrill even
+    # chose the object -- `_newest_key` takes whatever is newest under the
+    # prefix, so a partial upload, a second producer writing to the same place,
+    # or last night's job never landing all look identical from here.
+    #
+    # Medium: below the default fail-on, because plenty of deployments cannot
+    # produce a digest at backup time and this must not break their build. It
+    # is reported rather than left silent for the same reason SEQUENCE_UNCHECKED
+    # is -- the stage said `ok`, and `ok` was being read as `verified`.
+    if source.type in ("https", "s3") and source.sha256 is None and source.size is None:
+        report.findings.append(Finding(
+            stage="fetch", rule="ARTEFACT_UNVERIFIED", severity="medium",
+            message="the artefact was fetched but nothing checked it was the "
+                    "backup that was written",
+            fix="Set `source.sha256` to the digest your backup job recorded, or "
+                "`source.size` if a digest is not available. Without either, a "
+                "green run says these bytes restore -- not that they are the "
+                "bytes you meant to restore.",
+            evidence=f"{artifact.origin}",
+        ))
 
     # -- inspect -----------------------------------------------------------
     started = time.monotonic()

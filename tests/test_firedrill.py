@@ -1599,6 +1599,29 @@ def test_integration_https_source_and_its_checksums():
             f"version: 1\nsource:\n  type: https\n"
             f"  url: http://127.0.0.1:{server.server_address[1]}/nope.dump\n"))
         check("404 is reported", [f.rule for f in missing.findings], ["FETCH_FAILED"])
+
+        # A remote artefact with neither a digest nor a size restores fine and
+        # proves less than the green tick suggests: that these bytes restore,
+        # not that they are the bytes the backup job wrote. The stage said `ok`
+        # and said nothing else, and `ok` was being read as `verified`.
+        blind = drill.run(cfg=config.loads(
+            f"version: 1\nsource:\n  type: https\n  url: {url}\n"))
+        check("it still restores", blind.stage("restore").status, drill.OK)
+        check("and says what was not checked",
+              [f.rule for f in blind.findings], ["ARTEFACT_UNVERIFIED"])
+        check("the fetch line says so too",
+              "unverified" in blind.stage("fetch").detail, True)
+        # Medium, so it does not break a build that cannot produce a digest.
+        check("it does not fail the run by default", blind.exit_code, 0)
+        # And the other direction: checking either one is enough to silence it.
+        for extra, word in ((f"  sha256: {digest}\n", "sha256 verified"),
+                            (f"  size: {dump.stat().st_size}\n", "size verified")):
+            ok = drill.run(cfg=config.loads(
+                f"version: 1\nsource:\n  type: https\n  url: {url}\n{extra}"))
+            check(f"{word} silences it",
+                  [f.rule for f in ok.findings if f.rule == "ARTEFACT_UNVERIFIED"], [])
+            check(f"and the fetch line reads {word!r}",
+                  word in ok.stage("fetch").detail, True)
     finally:
         server.shutdown()
 
