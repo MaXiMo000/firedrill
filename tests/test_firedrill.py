@@ -1086,6 +1086,39 @@ def test_integration_sequence_behind_is_caught_by_integrity_alone():
     check("semantics is satisfied", report.stage("semantics").status, drill.OK)
 
 
+def test_integration_unpopulated_matview_is_caught_by_integrity_alone():
+    """A materialized view can exist and answer nothing, which is the same
+    shape as a constraint that exists and enforces nothing.
+
+    Measured on 16 before this check existed: pg_dump and pg_restore carry
+    `relispopulated` across exactly, pg_restore exits 0, and the restored
+    object is identical to a working one everywhere the structure rung looks --
+    catalog entry, definition, every column. Only a query separates them:
+
+        select * from customer_domains;
+        ERROR:  materialized view "customer_domains" has not been populated
+
+    So the whole ladder went green over a database with an object that raises
+    on first use.
+    """
+    needs_docker()
+    report = _ladder_run("matview_unpopulated.dump")
+    check("rule", [f.rule for f in report.findings], ["MATVIEW_UNPOPULATED"])
+    check("integrity failed", report.stage("integrity").status, drill.FAILED)
+    # The point of the fixture: nothing else can see it. The rows it does not
+    # hold are not rows any configured table check counts, so volume and
+    # semantics are both satisfied. Structure is not even configured here --
+    # and would not have caught it if it were, because the catalog entry, the
+    # definition and every column line are identical to the populated case.
+    # That was measured before this check existed; only a query separates them.
+    check("structure could not have caught it either",
+          report.stage("structure").status, drill.NOT_CONFIGURED)
+    check("volume is satisfied", report.stage("volume").status, drill.OK)
+    check("semantics is satisfied", report.stage("semantics").status, drill.OK)
+    check("it names the view",
+          "customer_domains" in report.findings[0].evidence, True)
+
+
 def test_integration_unconfigured_rungs_say_so_rather_than_passing():
     """With no config, volume and semantics have nothing to check. They must
     report 'not configured', which is not a tick."""

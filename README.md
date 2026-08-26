@@ -263,6 +263,7 @@ tick. "Nothing asked for this" and "this passed" are different facts.
 | `VOLUME_TABLE_MISSING` | the config expects a table the restore does not have |
 | `SEMANTICS_FAILED` | a smoke query restored cleanly and answered the wrong thing |
 | `SEQUENCE_BEHIND` | a sequence is below `max(id)`; the first insert will collide |
+| `MATVIEW_UNPOPULATED` | a materialized view came back holding nothing; every query against it raises |
 | `COLLATION_MISMATCH` | the target's libc differs from the reference's — text indexes sort differently |
 | `COLLATION_UNVERIFIABLE` | the target reports no collation version, so sort order cannot be checked at all |
 

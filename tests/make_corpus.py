@@ -45,6 +45,13 @@ HEADER_VERSIONS = ("13", "16", "18")
 # claims to catch a stale replica might really be catching a schema difference.
 SCHEMA = ("create table customer(id serial primary key, email text not null,"
           " created_at timestamptz default now());")
+# Part of the shared schema, not of one variant, so that the unpopulated case
+# below differs from healthy in exactly one respect: whether it holds rows.
+# Populated here, which is also what makes healthy prove the check does not
+# fire on a working materialized view.
+MATVIEW = ("create materialized view customer_domains as"
+           " select split_part(email, '@', 2) as domain, count(*) as n"
+           " from customer group by 1;")
 SEED = ("insert into customer(email)"
         " select 'user'||g||'@example.test' from generate_series(1,2000) g;")
 INDEX = "create index on customer(email);"
@@ -135,7 +142,7 @@ def _variant(src: "Source", dest: pathlib.Path, dbname: str, mutation: str):
     `template postgres`, which cannot run while we are connected to postgres.
     """
     src.psql(f"create database {dbname};")
-    for statement in (SCHEMA, SEED, INDEX, mutation):
+    for statement in (SCHEMA, SEED, INDEX, MATVIEW, mutation):
         src.psql(statement, db=dbname)
     return src.dump(dest, db=dbname)
 
@@ -269,7 +276,7 @@ def build(outdir: pathlib.Path = DEFAULT_OUT) -> dict:
     for major in VERSIONS:
         with Source(major) as src:
             # -- healthy: the important one. Must produce zero findings.
-            for statement in (SCHEMA, SEED, INDEX):
+            for statement in (SCHEMA, SEED, INDEX, MATVIEW):
                 src.psql(statement)
             healthy = src.dump(outdir / f"healthy_pg{major}.dump")
             made[f"healthy_pg{major}"] = healthy
@@ -338,6 +345,15 @@ def build(outdir: pathlib.Path = DEFAULT_OUT) -> dict:
                 made["sequence_behind"] = _variant(
                     src, outdir / "sequence_behind.dump", "sequence_behind",
                     "select setval('customer_id_seq', 5, true);",
+                )
+
+                # -- matview_unpopulated: the view exists, its definition and
+                # columns are intact, and it holds nothing. pg_restore exits 0
+                # and every query against it raises. Indistinguishable, after
+                # the fact, from a REFRESH that failed during the restore.
+                made["matview_unpopulated"] = _variant(
+                    src, outdir / "matview_unpopulated.dump", "matview_unpopulated",
+                    "refresh materialized view customer_domains with no data;",
                 )
 
     # -- missing_extension: a dump that uses an extension the restore target

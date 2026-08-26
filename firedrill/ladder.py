@@ -556,13 +556,42 @@ select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace
 where c.relkind = 'S' and n.nspname !~ '^pg_' and n.nspname <> 'information_schema'
 """
 
+# A materialized view can exist and answer nothing -- the same shape as a
+# constraint that exists and enforces nothing, and invisible in the same way.
+#
+# `relispopulated` is false both for a view created WITH NO DATA and for one
+# whose REFRESH failed partway through the restore, and afterwards the two are
+# indistinguishable. Measured on 16: pg_dump and pg_restore carry the flag
+# across exactly, pg_restore exits 0 either way, and the restored object is
+# byte-identical to a working one everywhere the structure rung looks -- the
+# catalog entry, the definition and every column line come back the same. Only
+# a query tells them apart:
+#
+#     select * from revenue_stale;
+#     ERROR:  materialized view "revenue_stale" has not been populated
+#
+# So the whole ladder goes green over a database with an object that raises on
+# first use. Deliberately not folded into _SNAPSHOT: `structure` compares
+# reference and restore as sets of lines, so appending the state to the view
+# line would make every committed reference report one MISSING and one
+# UNEXPECTED per materialized view on the next run. This also catches it on a
+# first run, where there is no reference to drift from.
+_MATVIEWS_UNPOPULATED = """
+select n.nspname||'.'||c.relname
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+where c.relkind = 'm' and not c.relispopulated
+  and n.nspname !~ '^pg_' and n.nspname <> 'information_schema'
+order by 1
+"""
+
 
 def integrity(container, cfg, database: str,
               sequences: bool = True) -> tuple[list[Finding], dict]:
     """The checks only a restore can make.
 
     Currently: every sequence is at or ahead of the maximum value in the
-    column it feeds.
+    column it feeds, and no materialized view came back holding nothing.
 
     Deliberately not here yet:
 
@@ -674,5 +703,23 @@ def integrity(container, cfg, database: str,
             evidence="",
         ))
 
+    stale = [row[0] for row in _rows(
+        container.sql(_MATVIEWS_UNPOPULATED.strip(), database=database)) if row]
+    if stale:
+        findings.append(Finding(
+            stage="integrity", rule="MATVIEW_UNPOPULATED", severity="medium",
+            message=f"{len(stale)} materialized view(s) hold no data and raise "
+                    "on any query",
+            fix="A materialized view restores unpopulated when the source was "
+                "unpopulated, and also when the REFRESH in the dump's post-data "
+                "section failed -- pg_restore exits 0 either way and the object "
+                "looks identical to a working one. Query one to see which you "
+                "have: if the source is populated, the refresh failed and this "
+                "restore is not usable; if it is not, the restore is faithful "
+                "and the view was already answering nothing. Medium because "
+                "only you can tell those apart.",
+            evidence="\n".join(stale[:20]),
+        ))
+
     return findings, {"sequences": checked, "sequences_present": total,
-                      **collation_info}
+                      "matviews_unpopulated": len(stale), **collation_info}
