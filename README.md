@@ -19,7 +19,8 @@ confidence.
 
 ## Status
 
-**Phases 0–4.** Fetch (local, presigned URL, or S3, checksum-verified),
+**Phases 0–4.** Fetch (local, presigned URL, or S3, checksum-verified when you
+supply a digest — and reported as unverified when you do not),
 restore into an ephemeral version-matched container, then the ladder:
 structure, volume, semantics, integrity. Three tiers, JUnit and JSON output,
 a history file that turns RTO into a measured trend, a GitHub Action, and
@@ -254,6 +255,7 @@ tick. "Nothing asked for this" and "this passed" are different facts.
 | `SOURCE_AMBIGUOUS` | a path *and* a configured source — which backup did you mean? |
 | `VOLUME_DRIFT` | a table lost more rows than the tolerance allows, against the last known-good run |
 | `SEQUENCE_UNCHECKED` | the database has sequences and none could be tied to a column, so none were checked |
+| `ARTEFACT_UNVERIFIED` | a remote artefact was fetched with neither a digest nor a size to check it against |
 | `PITR_TARGET_UNREACHED` | the WAL archive ends before the moment you asked to recover to |
 | `PITR_UNASSERTED` | recovery reached the target and nothing checked what the database then held |
 | `VERSION_MISMATCH` | `--postgres` pinned a major the archive did not come from |
