@@ -335,12 +335,38 @@ exit <span style="color:var(--escalate)">1</span></pre>
       </div>
 
       <div class="find">
+        <div class="stamp">Field test · pagila, re-run</div>
+        <h4>A materialized view that ships permanently empty</h4>
+        <p>pagila's own schema defines <code>rental_by_category</code> as a
+        materialized view. Neither <code>pagila-schema.sql</code> nor
+        <code>pagila-data.sql</code> ever refreshes it, so a stock, unmutated
+        restore genuinely holds zero rows there — a query against it raises on
+        every fresh load, healthy or not. Found the same way as the sequence
+        bug above: restoring a database this project did not write, not by
+        reasoning about one it did.</p>
+<pre>MATVIEW_UNPOPULATED  <span style="color:var(--escalate)">1</span> materialized view(s) hold no data</pre>
+      </div>
+
+      <div class="find">
         <div class="stamp">Toolchain · Windows runners</div>
         <h4>bash -n exits 1 with empty stderr</h4>
         <p>Because <code>bash</code> there is the WSL stub. A failure with no message
         at all is the tell. Probe a tool before trusting its exit code — the same
         lesson, twice, in one project.</p>
 <pre>bash -n &lt;&lt;&lt; ':'   →   rc=<span style="color:var(--ember)">1</span>, stderr=""</pre>
+      </div>
+
+      <div class="find">
+        <div class="stamp">Mutation matrix · pagila, re-run</div>
+        <h4>Eleven ways to break a stranger's schema, eleven caught</h4>
+        <p>The synthetic corpus is written by the same person as the checks —
+        precise, and unable to find the case its author did not think of. This
+        breaks a real, unrelated 70-table schema one way at a time instead:
+        drop a trigger, a function, a view, an index, a column; empty a table;
+        walk a sequence back; backdate a year of rows; loosen a constraint;
+        enable row-level security. Every mutation produced a finding, and the
+        one restore nobody touched stayed silent.</p>
+<pre>11 mutation(s)  ·  11 caught  ·  healthy: <span style="color:var(--beam)">silent</span></pre>
       </div>
 
     </div>

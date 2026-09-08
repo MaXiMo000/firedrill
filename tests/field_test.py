@@ -161,6 +161,15 @@ semantics:
   - name: recent rentals exist
     sql: "select count(*) from rental where rental_date > now() - interval '8 years'"
     expect: "> 0"
+ignore:
+  - check: MATVIEW_UNPOPULATED
+    reason: >-
+      pagila's own schema defines rental_by_category as a materialized view
+      and neither pagila-schema.sql nor pagila-data.sql ever refreshes it --
+      a stock, unmutated pagila restore genuinely has this finding, measured
+      by field_test.py itself. Real, not a firedrill false positive; ignored
+      here only so the *mutation* assertions below stay readable against a
+      background finding every restore of this database will always have.
 """
 
 
