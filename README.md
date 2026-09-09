@@ -1,5 +1,8 @@
 # firedrill
 
+[![ci](https://github.com/MaXiMo000/firedrill/actions/workflows/ci.yml/badge.svg)](https://github.com/MaXiMo000/firedrill/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/firedrill)](https://pypi.org/project/firedrill/)
+
 **You don't have backups. You have hopes.**
 
 firedrill takes a Postgres backup and *actually restores it* into a disposable,
@@ -83,6 +86,7 @@ firedrill run dump.dump --json report.json # machine-readable
 firedrill run dump.dump --rto 45m          # exceeding the budget is a finding
 firedrill run dump.dump --tier fast        # schema only, for every commit
 firedrill clean                            # remove containers left by a crash
+firedrill doctor                           # check Docker, disk and config before trusting a run
 ```
 
 Exit code is `0` only when the restore genuinely ran and produced no finding at

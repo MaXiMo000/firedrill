@@ -440,6 +440,45 @@ def test_cli_run_on_missing_file_fails_loudly():
     check("non-zero", code, 1)
 
 
+def test_doctor_checks_the_things_run_assumes_and_never_reports():
+    """`run` reports precisely why a restore failed once it starts. `doctor`
+    is for the failure before that -- no Docker, no disk, no writable temp --
+    which a first-time user otherwise meets as a bare traceback and nothing
+    else to read."""
+    checks = drill.doctor_checks()
+    names = {name for name, _, _ in checks}
+    for expected in ("docker", "scratch disk space", "scratch dir writable",
+                      "firedrill.yml"):
+        check(f"doctor checks {expected}", expected in names, True)
+    # This sandbox's own temp dir is real and writable -- if it were not,
+    # every other integration test above would already be failing.
+    check("scratch dir writable here",
+          dict((n, ok) for n, ok, _ in checks)["scratch dir writable"], True)
+
+
+def test_cli_doctor_exit_code_matches_the_checks():
+    from firedrill.cli import main
+    ok = all(ok for _, ok, _ in drill.doctor_checks())
+    check("doctor exit code", main(["doctor"]), 0 if ok else 1)
+
+
+def test_a_scratch_dir_that_will_not_remove_is_reported_not_swallowed():
+    """The old `shutil.rmtree(workdir, ignore_errors=True)` meant a leaked
+    scratch directory -- and whatever it still held -- vanished with no trace
+    anywhere in the report. No Docker needed: a missing dump fails before any
+    container is touched, and cleanup still runs on that path."""
+    import unittest.mock as mock
+    with mock.patch("firedrill.drill.shutil.rmtree", side_effect=OSError("boom")):
+        report = drill.run(str(HERE / "definitely-not-here.dump"))
+    rules = {f.rule for f in report.findings}
+    check("cleanup failure reported", "CLEANUP_FAILED" in rules, True)
+    check("severity is low, not a restore failure",
+          next(f.severity for f in report.findings if f.rule == "CLEANUP_FAILED"),
+          "low")
+    check("does not mask why the restore itself did not happen",
+          len(rules) > 1, True)
+
+
 # -------------------------------------------------------------- config ------
 
 GOOD_CONFIG = """
@@ -2062,6 +2101,43 @@ def test_integration_row_security_switched_off_is_caught():
         check("naming row security specifically",
               "rowsecurity" in report.findings[0].evidence, True)
         check("non-zero", report.exit_code, 1)
+
+
+def test_integration_a_lost_grant_is_caught():
+    """A GRANT is invisible to every other line in the snapshot: the table,
+    its columns and its RLS policies can all come back exactly as recorded
+    while a role that could read it no longer can, or gained write access it
+    never had. Measured: an explicit GRANT's ACL survives an identical
+    dump/restore byte-for-byte (down to Postgres materialising the owner's
+    full privilege set the moment any ACL entry exists), so a stripped grant
+    is a genuine restore difference, not noise from pg_dump/pg_restore."""
+    needs_docker()
+    import make_corpus
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        with make_corpus.Source(make_corpus.VERSIONS[0]) as src:
+            src.psql("create database granted;")
+            src.psql("create table t(id int);", db="granted")
+            src.psql("grant select on t to public;", db="granted")
+            src.psql("create database bare;")
+            src.psql("create table t(id int);", db="bare")
+            good = src.dump(pathlib.Path(tmp) / "granted.dump", db="granted")
+            bare = src.dump(pathlib.Path(tmp) / "bare.dump", db="bare")
+
+        ref = pathlib.Path(tmp) / "ref.txt"
+        drill.run(good, write_reference=ref)
+        kinds = {line.split("|", 1)[0] for line in ref.read_text(encoding="utf-8").splitlines()}
+        check("the reference captures the grant", "grant" in kinds, True)
+
+        cfg = config.loads(f"version: 1\nstructure:\n  reference: {ref}\n")
+        check("the granted original is silent",
+              [f.rule for f in drill.run(good, cfg=cfg).findings], [])
+
+        report = drill.run(bare, cfg=cfg)
+        check("losing the grant is caught", [f.rule for f in report.findings],
+              ["STRUCTURE_MISSING"])
+        check("naming the grant specifically",
+              "grant" in report.findings[0].evidence, True)
 
 
 def test_pitr_target_cannot_inject_postgres_settings():

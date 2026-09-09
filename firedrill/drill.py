@@ -109,10 +109,29 @@ def run(dump_path: str | pathlib.Path | None = None, *, cfg=None, **kw) -> Repor
     # exits. A local source is read in place and never lands here, so a
     # cleanup bug cannot reach the user's own backup file.
     workdir = pathlib.Path(tempfile.mkdtemp(prefix="firedrill-"))
+    cleanup_error = None
     try:
         report = _suppress(_run(dump_path, cfg=cfg, workdir=workdir, **kw), cfg)
     finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+        try:
+            shutil.rmtree(workdir)
+        except OSError as exc:
+            # Silently swallowing this (the old `ignore_errors=True`) meant a
+            # leaked scratch directory -- and whatever downloaded artefact it
+            # held -- never showed up anywhere. It cannot fail the run (the
+            # restore itself is unaffected), so it is `low` rather than the
+            # `high` a real drill finding gets.
+            cleanup_error = exc
+
+    if cleanup_error is not None:
+        report.findings.append(Finding(
+            stage="restore", rule="CLEANUP_FAILED", severity="low",
+            message=f"could not remove the scratch directory {workdir}: {cleanup_error}",
+            fix="The drill itself is unaffected. Remove the directory by hand; "
+                "`firedrill clean` will not find it, since it only tracks "
+                "labelled Docker containers.",
+            evidence="",
+        ))
 
     # Recorded after suppression, so the history says what the run reported
     # rather than what it would have reported with a different config. Written
@@ -672,3 +691,54 @@ def _run(dump_path: str | pathlib.Path | None = None, *, flavour: str = "",
             evidence="",
         ))
     return report
+
+
+# 1 GiB is a guess, not a measurement -- nobody has field-tested the smallest
+# restore that still fits. It exists so a first run on a nearly-full disk
+# fails with "not enough space" instead of a `pg_restore` error two minutes
+# into a container nobody can read the message of.
+# ponytail: fixed floor, not sized from the archive; raise it, or make it
+# `size_of(dump) * N`, if a real restore is ever seen to need more.
+_MIN_SCRATCH_BYTES = 1 * 1024**3
+
+
+def doctor_checks() -> list[tuple[str, bool, str]]:
+    """(name, ok, detail) for everything `run` assumes and never checks itself.
+
+    Nothing here talks to a container -- `run` already reports precisely why a
+    restore did not happen. This is for the failure *before* that: the one a
+    first-time user hits with no report at all to read.
+    """
+    checks: list[tuple[str, bool, str]] = []
+
+    usable, why = docker.docker_available()
+    checks.append(("docker", usable, why))
+
+    scratch = pathlib.Path(tempfile.gettempdir())
+    try:
+        free = shutil.disk_usage(scratch).free
+        checks.append((
+            "scratch disk space", free >= _MIN_SCRATCH_BYTES,
+            f"{free / 1024**3:.1f} GiB free on {scratch}",
+        ))
+    except OSError as exc:
+        checks.append(("scratch disk space", False, f"could not stat {scratch}: {exc}"))
+
+    try:
+        with tempfile.NamedTemporaryFile(dir=scratch, prefix="firedrill-doctor-"):
+            pass
+        checks.append(("scratch dir writable", True, str(scratch)))
+    except OSError as exc:
+        checks.append(("scratch dir writable", False, f"{scratch}: {exc}"))
+
+    found = _config_module.find()
+    if found is None:
+        checks.append(("firedrill.yml", True, "none found -- `run` will use defaults"))
+    else:
+        try:
+            _config_module.load(found)
+            checks.append(("firedrill.yml", True, f"{found} parses cleanly"))
+        except _config_module.ConfigError as exc:
+            checks.append(("firedrill.yml", False, f"{found}: {exc}"))
+
+    return checks

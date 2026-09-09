@@ -85,6 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     drill_pitr.add_argument("--quiet", action="store_true")
 
     sub.add_parser("clean", help="remove containers left behind by a crash")
+    sub.add_parser("doctor", help="check the environment before trusting a run")
     return parser
 
 
@@ -112,6 +113,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"removed {len(removed)} container(s)"
               + (": " + ", ".join(removed) if removed else ""))
         return 0
+
+    if args.command == "doctor":
+        checks = drill.doctor_checks()
+        for name, ok, detail in checks:
+            print(f"[{'ok  ' if ok else 'FAIL'}] {name:<20} {detail}")
+        return 0 if all(ok for _, ok, _ in checks) else 1
 
     # An explicitly named config that cannot be read is a hard error. Falling
     # back to defaults would run a weaker set of checks than the user asked

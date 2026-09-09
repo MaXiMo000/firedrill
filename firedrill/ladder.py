@@ -133,6 +133,22 @@ join pg_class c on c.oid = pol.polrelid
 join pg_namespace n on n.oid = c.relnamespace
 where n.nspname !~ '^pg_' and n.nspname <> 'information_schema'
 union all
+-- A GRANT lost in restore is invisible to every line above: the table, its
+-- columns and its RLS policies can all come back exactly as recorded while a
+-- role that should be able to read it no longer can, or a role that should
+-- not have write access silently has it. relacl is NULL for a table nobody
+-- has explicitly granted anything on -- the implicit "owner has everything,
+-- nobody else has anything" default -- and that default is excluded, the
+-- same way a default NOT NULL or a default owner is left out above.
+select 'grant', n.nspname||'.'||c.relname||'.'||coalesce(r.rolname, 'PUBLIC'),
+       a.privilege_type || case when a.is_grantable then ' with grant option' else '' end
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+cross join lateral aclexplode(c.relacl) as a(grantor, grantee, privilege_type, is_grantable)
+left join pg_roles r on r.oid = a.grantee
+where c.relkind in ('r', 'p') and c.relacl is not null
+  and n.nspname !~ '^pg_' and n.nspname <> 'information_schema'
+union all
 -- Whether row security is ON, separately from whether policies exist. A table
 -- can come back with all its policies and RLS disabled, which is wide open.
 select 'rowsecurity', n.nspname||'.'||c.relname,
