@@ -135,6 +135,8 @@ Three properties worth stating plainly:
 | tar | `-Ft` | yes |
 | plain SQL | `-Fp` | **no**, and it cannot be |
 
+`--jobs N` (or `jobs: N` in `firedrill.yml`) passes `-j N` to `pg_restore`, which is what makes the directory format's parallel restore actually parallel. Custom and tar archives accept it too, restoring serially where `pg_restore` cannot split the work. Default is 1.
+
 Custom, directory and tar all carry a `PGDMP` header — directory and tar keep
 theirs in a `toc.dat` member — so the major version is read out of the artefact
 itself, with no PostgreSQL client on the host. That is what makes the

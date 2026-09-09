@@ -56,6 +56,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--tier", choices=config.ALL_TIERS,
                      help="how much to restore. `fast` is schema-only: the "
                           "row-reading checks then report NOT RUN, never a pass.")
+    run.add_argument("--jobs", type=int, metavar="N",
+                     help="parallel pg_restore workers (default: 1). Only "
+                          "helps on a multi-core host restoring a large "
+                          "custom or directory archive.")
     run.add_argument("--junit", metavar="PATH",
                      help="write a JUnit XML report here, for CI to display")
     run.add_argument("--history", metavar="PATH",
@@ -139,6 +143,12 @@ def main(argv: list[str] | None = None) -> int:
                 raise config.ConfigError(
                     f"tier {args.tier!r} is not implemented yet; "
                     f"available: {', '.join(config.IMPLEMENTED_TIERS)}")
+        if args.jobs is not None:
+            # `if args.jobs:` would treat --jobs 0 as "not passed" -- 0 is
+            # falsy, and that is exactly the value most worth catching here.
+            if args.jobs < 1:
+                raise config.ConfigError(f"--jobs must be a positive integer, got {args.jobs}")
+            cfg = dataclasses.replace(cfg, jobs=args.jobs)
     except config.ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2

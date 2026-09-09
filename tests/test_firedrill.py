@@ -440,6 +440,16 @@ def test_cli_run_on_missing_file_fails_loudly():
     check("non-zero", code, 1)
 
 
+def test_cli_jobs_flag_is_validated_before_any_restore_is_attempted():
+    """A bad --jobs must fail as a config error (exit 2), the same as a bad
+    value in firedrill.yml would -- not reach restore.py and fail as
+    something that looks like a broken backup."""
+    from firedrill.cli import main
+    code = main(["run", str(HERE / "definitely-not-here.dump"),
+                "--jobs", "0", "--quiet"])
+    check("config error, not a restore failure", code, 2)
+
+
 def test_doctor_checks_the_things_run_assumes_and_never_reports():
     """`run` reports precisely why a restore failed once it starts. `doctor`
     is for the failure before that -- no Docker, no disk, no writable temp --
@@ -619,6 +629,18 @@ def test_config_unimplemented_tier_is_refused_not_silently_upgraded():
 
 def test_config_dsn_target_is_refused_until_its_interlocks_exist():
     _rejects("dsn", "version: 1\ntarget:\n  type: dsn\n", "four interlocks")
+
+
+def test_config_jobs_defaults_to_one_and_validates():
+    """restore.py has taken a jobs parameter since Phase 1; nothing called it
+    with anything but the default until this session. Pinning both the
+    default and the validation so it stays reachable."""
+    check("default is 1", config.loads("version: 1\n").jobs, 1)
+    check("a real value loads", config.loads("version: 1\njobs: 4\n").jobs, 4)
+    _rejects("zero", "version: 1\njobs: 0\n", "positive integer")
+    _rejects("negative", "version: 1\njobs: -1\n", "positive integer")
+    _rejects("not an integer", "version: 1\njobs: 2.5\n", "positive integer")
+    _rejects("a bool is not an integer here", "version: 1\njobs: true\n", "positive integer")
 
 
 def test_config_version_must_be_stated():

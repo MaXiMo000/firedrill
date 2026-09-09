@@ -553,7 +553,7 @@ def _run(dump_path: str | pathlib.Path | None = None, *, flavour: str = "",
         stage("target").detail = container.image
 
         # -- restore -------------------------------------------------------
-        result = restore_stage.run_restore(container, tier=cfg.tier,
+        result = restore_stage.run_restore(container, jobs=cfg.jobs, tier=cfg.tier,
                                            tables=cfg.sample_tables)
         report.findings.extend(result.findings)
         stage("restore").seconds = result.seconds

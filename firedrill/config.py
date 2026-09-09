@@ -161,6 +161,7 @@ class Config:
     volume_tolerance: float | None = None
     volume_tables: dict = dataclasses.field(default_factory=dict)
     sample_tables: tuple = ()
+    jobs: int = 1
     semantics: tuple = ()
     ignore: dict = dataclasses.field(default_factory=dict)
     source: Source | None = None
@@ -176,7 +177,7 @@ class Config:
 DEFAULT = Config()
 
 _TOP = ("version", "source", "target", "tier", "rto_budget", "history",
-        "structure", "volume", "semantics", "sample", "ignore")
+        "structure", "volume", "semantics", "sample", "ignore", "jobs")
 
 _SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 
@@ -227,6 +228,16 @@ def loads(text: str, path: pathlib.Path | None = None) -> Config:
 
     history = raw.get("history")
     history_path = pathlib.Path(history) if history else None
+
+    # -- jobs ----------------------------------------------------------
+    # restore.py has taken this parameter since Phase 1; nothing called it
+    # with anything but the default until now. pg_restore's own --jobs
+    # needs no format check here -- an archive it cannot parallelise (a
+    # single-table dump, say) just restores serially, no differently from
+    # today, so there is no wrong value short of the type itself.
+    jobs = raw.get("jobs", 1)
+    if not isinstance(jobs, int) or isinstance(jobs, bool) or jobs < 1:
+        raise ConfigError(f"jobs must be a positive integer, got {jobs!r}")
 
     rto = raw.get("rto_budget")
     rto_budget = parse_duration(rto) if rto is not None else None
@@ -330,6 +341,7 @@ def loads(text: str, path: pathlib.Path | None = None) -> Config:
         volume_tolerance=volume_tolerance,
         volume_tables=volume_tables,
         sample_tables=sample_tables,
+        jobs=jobs,
         semantics=tuple(semantics),
         ignore=ignore,
         path=path,
