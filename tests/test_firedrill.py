@@ -971,12 +971,28 @@ def test_config_defaults_when_there_is_no_file():
 # daemon exited 0 and the probe called it usable.
 
 def _stub_docker_info(returncode: int, stdout: str):
-    """Replace docker._run for one probe call. Returns the restore callable."""
-    original = docker._run
+    """Replace docker._run for one probe call. Returns the restore callable.
+
+    Also stubs shutil.which("docker") so this probe is testable on a machine
+    with no real `docker` binary on PATH -- docker_available() checks that
+    first and returns before ever reaching the stubbed _run, which silently
+    turned these into "requires a real docker install" tests despite every
+    line inside them being mocked. Found running this suite on a machine with
+    no Docker at all: all three failed with "the `docker` command is not on
+    PATH" regardless of what _run was stubbed to return.
+    """
+    original_run = docker._run
+    original_which = docker.shutil.which
     docker._run = lambda *a, **k: subprocess.CompletedProcess(
         args=["docker", "info"], returncode=returncode, stdout=stdout, stderr=""
     )
-    return lambda: setattr(docker, "_run", original)
+    docker.shutil.which = lambda cmd: "/usr/bin/docker" if cmd == "docker" else original_which(cmd)
+
+    def _restore():
+        docker._run = original_run
+        docker.shutil.which = original_which
+
+    return _restore
 
 
 def test_probe_rejects_an_empty_server_version():
