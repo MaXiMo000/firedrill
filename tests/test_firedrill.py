@@ -1522,7 +1522,7 @@ def test_integration_fast_tier_misses_what_it_says_it_misses():
 # ------------------------------------------------------------- sources -----
 # PLAN.md §9 Phase 2's exit condition is "runs against a real bucket with
 # read-only credentials". A real AWS bucket is not something a test suite may
-# create, so these run against MinIO: a real S3 server speaking the real
+# create, so these run against S3Mock: a real S3 server speaking the real
 # protocol over a real socket, with credentials taken from the environment
 # exactly as §7 requires. What that does NOT prove is AWS-specific IAM
 # behaviour, and this comment is here so nobody later mistakes one for the
@@ -1531,21 +1531,27 @@ def test_integration_fast_tier_misses_what_it_says_it_misses():
 import contextlib
 
 
+# Adobe's S3Mock, pinned by digest (tag 5.2). This used to be minio/minio,
+# until MinIO withdrew its community images from Docker Hub and every CI
+# run failed to pull it. A digest can't be withdrawn out from under us the
+# way a floating tag can. S3Mock accepts any credentials.
+S3_SERVER_IMAGE = ("adobe/s3mock@sha256:"
+                   "ab01a6946750f451ca215a47e91030695b260e4003b8a5a6201d25029b8fca92")
+
+
 @contextlib.contextmanager
-def _minio():
+def _s3_server():
     """A throwaway S3 server, torn down in a finally like everything else."""
     import uuid
-    name = f"firedrill-minio-{uuid.uuid4().hex[:8]}"
+    name = f"firedrill-s3-{uuid.uuid4().hex[:8]}"
     started = subprocess.run(
         ["docker", "run", "-d", "--name", name, "--label", "firedrill=1",
-         "-e", "MINIO_ROOT_USER=firedrilltest",
-         "-e", "MINIO_ROOT_PASSWORD=firedrilltest-secret",
-         "-p", "0:9000", "minio/minio", "server", "/data"],
+         "-p", "0:9090", S3_SERVER_IMAGE],
         capture_output=True, text=True)
     if started.returncode != 0:
-        raise Skip(f"could not start minio: {started.stderr.strip()[:120]}")
+        raise Skip(f"could not start the S3 server: {started.stderr.strip()[:120]}")
     try:
-        mapped = subprocess.run(["docker", "port", name, "9000/tcp"],
+        mapped = subprocess.run(["docker", "port", name, "9090/tcp"],
                                 capture_output=True, text=True).stdout.strip()
         endpoint = f"http://127.0.0.1:{mapped.splitlines()[0].rsplit(':', 1)[1]}"
         import os
@@ -1561,7 +1567,7 @@ def _minio():
             except Exception:
                 time.sleep(0.5)
         else:
-            raise Skip("minio never became ready")
+            raise Skip("the S3 server never became ready")
         yield endpoint, client
     finally:
         subprocess.run(["docker", "rm", "-f", "-v", name], capture_output=True)
@@ -1582,7 +1588,7 @@ def _s3_cfg(endpoint: str, extra: str) -> str:
 def test_integration_s3_source_against_a_real_bucket():
     needs_docker()
     _needs_boto3()
-    with _minio() as (endpoint, client):
+    with _s3_server() as (endpoint, client):
         client.create_bucket(Bucket="backups")
         dump = corpus("healthy_pg16.dump")
         client.upload_file(str(dump), "backups", "postgres/daily/2026-08-24.dump")
@@ -1615,7 +1621,7 @@ def test_integration_s3_failures_are_never_a_pass():
     report, and none of them may reach a container."""
     needs_docker()
     _needs_boto3()
-    with _minio() as (endpoint, client):
+    with _s3_server() as (endpoint, client):
         client.create_bucket(Bucket="backups")
         client.upload_file(str(corpus("healthy_pg16.dump")), "backups", "b.dump")
 
