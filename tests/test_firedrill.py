@@ -995,6 +995,24 @@ def _stub_docker_info(returncode: int, stdout: str):
     return _restore
 
 
+def test_a_hung_docker_command_is_a_failed_command_not_a_crash():
+    """Seen live on Docker Desktop: one `pg_isready` probe hung past its 30s
+    timeout and TimeoutExpired escaped drill.run() as a traceback, with no
+    report. A timeout is now a non-zero exit every caller already handles."""
+    original = docker.subprocess.run
+
+    def hang(args, **kw):
+        raise subprocess.TimeoutExpired(args, kw.get("timeout"))
+
+    docker.subprocess.run = hang
+    try:
+        result = docker._run(["docker", "exec", "x", "pg_isready"], timeout=30)
+    finally:
+        docker.subprocess.run = original
+    check("a timeout is reported as exit 124", result.returncode, docker.TIMED_OUT)
+    check("and says what timed out", "timed out after 30s" in result.stderr, True)
+
+
 def test_probe_rejects_an_empty_server_version():
     """Exit code 0 with no server version is a dead daemon, not a live one."""
     restore_run = _stub_docker_info(0, "|linux\n")
