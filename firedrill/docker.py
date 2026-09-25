@@ -48,10 +48,24 @@ class TargetError(Exception):
     """The container could not be brought up or used."""
 
 
+TIMED_OUT = 124  # same code coreutils `timeout` uses
+
+
 def _run(args: list[str], env: dict | None = None, timeout: int = 300):
-    return subprocess.run(
-        args, capture_output=True, text=True, timeout=timeout, env=env, check=False
-    )
+    """A docker command that hangs past `timeout` comes back as a failed
+    command (exit 124), not an exception. Every caller already handles a
+    non-zero exit as "this did not work"; an exception instead escaped the
+    whole run as a traceback, with no report at all. Seen live: one
+    `pg_isready` probe stalled for 30s on a loaded Docker Desktop host and
+    crashed a restore that had minutes of ready_timeout left."""
+    try:
+        return subprocess.run(
+            args, capture_output=True, text=True, timeout=timeout, env=env, check=False
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args, TIMED_OUT, stdout="", stderr=f"`{' '.join(args[:3])}` timed out after {timeout}s"
+        )
 
 
 def docker_available() -> tuple[bool, str]:
@@ -66,7 +80,7 @@ def docker_available() -> tuple[bool, str]:
     try:
         result = _run(["docker", "info", "--format", "{{.ServerVersion}}|{{.OSType}}"],
                       timeout=30)
-    except (subprocess.TimeoutExpired, OSError) as exc:
+    except OSError as exc:  # a timeout is already a failed result from _run
         return False, f"`docker info` did not complete: {exc}"
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip().splitlines()
