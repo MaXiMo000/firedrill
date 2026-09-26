@@ -148,6 +148,54 @@ def test_plain_sql_is_rejected_with_a_useful_message():
         check("suggests the cause", "plain-SQL" in str(exc), True)
 
 
+_PLAIN = ("--\n-- PostgreSQL database dump\n--\n\n"
+          "-- Dumped from database version 16.15 (Debian 16.15-1.pgdg13+2)\n"
+          "-- Dumped by pg_dump version 16.15 (Debian 16.15-1.pgdg13+2)\n\n"
+          "SET statement_timeout = 0;\n" + "COPY public.t (id) FROM stdin;\n" +
+          "".join(f"{i}\n" for i in range(5000)) + "\\.\n\n"
+          "--\n-- PostgreSQL database dump complete\n--\n\n\\unrestrict abc\n")
+
+
+def test_plain_sql_header_version_and_completeness():
+    import gzip
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        d = pathlib.Path(tmp)
+        cases = {
+            "whole.sql": (_PLAIN.encode(), True),
+            "cut.sql": (_PLAIN.encode()[: len(_PLAIN) // 2], False),
+            "whole.sql.gz": (gzip.compress(_PLAIN.encode()), True),
+            "cut.sql.gz": (gzip.compress(_PLAIN.encode())[:200], False),  # cut inside the first 64 KB
+        }
+        for name, (data, complete) in cases.items():
+            (d / name).write_bytes(data)
+            h = archive.read_header(d / name)
+            check(f"{name}: plain", h.format_name, "plain")
+            check(f"{name}: version from the header comment", h.server_major, "16")
+            check(f"{name}: complete", h.complete, complete)
+            check(f"{name}: gzipped", h.gzipped, name.endswith(".gz"))
+        (d / "noversion.sql").write_text(_PLAIN.replace("-- Dumped from database version", "-- (edited)"))
+        check("a stripped version line is None, not a guess",
+              archive.read_header(d / "noversion.sql").server_version, None)
+        (d / "other.gz").write_bytes(gzip.compress(b"not a dump at all"))
+        try:
+            archive.read_header(d / "other.gz")
+            FAILURES.append("  a gzip of something else should raise")
+        except archive.ArchiveError as exc:
+            check("says it is gzipped", "gzipped" in str(exc), True)
+
+
+def test_psql_stderr_is_classified_like_pg_restore():
+    """Transcripts measured on PostgreSQL 16 (psql -f, and piped from gunzip)."""
+    got = restore.parse_psql_stderr(
+        'psql:/firedrill/dump:48: ERROR:  role "appuser" does not exist\n'
+        "psql:<stdin>:12: ERROR:  syntax error at or near \"x\"\n"
+        "gzip: /firedrill/dump: unexpected end of file\n"
+        'psql:/firedrill/dump:48: ERROR:  role "appuser" does not exist\n')
+    check("rules", [f.rule for f in got], ["ROLE_ABSENT", "RESTORE_ERROR", "ARCHIVE_TRUNCATED"])
+    check("a clean restore says nothing", restore.parse_psql_stderr(""), [])
+
+
 def test_absurd_string_length_is_rejected():
     """A corrupt length field is how a damaged header usually presents."""
     blob = b"PGDMP" + bytes([1, 15, 0, 4, 8, 1, 1]) + b"\x00\xff\xff\xff\x7f" * 12
@@ -1099,10 +1147,23 @@ def test_integration_empty_database_is_caught():
     check("exit 1", report.exit_code, 1)
 
 
-def test_integration_plain_sql_is_rejected():
+def test_integration_a_healthy_plain_dump_restores_clean():
     needs_docker()
-    report = drill.run(corpus("not_an_archive.sql"))
-    check("rule", [f.rule for f in report.findings], ["ARCHIVE_UNREADABLE"])
+    for name in ("healthy.sql", "healthy.sql.gz"):
+        report = drill.run(corpus(name))
+        check(f"{name}: no findings", [f.rule for f in report.findings], [])
+        check(f"{name}: passes", report.exit_code, 0)
+        check(f"{name}: read as plain", report.archive["format"], "plain")
+
+
+def test_integration_a_truncated_plain_dump_is_caught():
+    """Measured: psql restores a cut-off plain dump with exit 0 and no error.
+    The missing completion trailer is the only witness, and it must fail."""
+    needs_docker()
+    for name in ("truncated.sql", "truncated.sql.gz"):
+        report = drill.run(corpus(name))
+        check(f"{name}: truncation reported", "ARCHIVE_TRUNCATED" in [f.rule for f in report.findings], True)
+        check(f"{name}: fails", report.exit_code, 1)
 
 
 def test_integration_probe_reads_a_real_daemon():
@@ -2346,12 +2407,12 @@ def test_integration_a_directory_must_actually_be_a_dump():
         check("nothing was started", report.stage("target").status, drill.NOT_RUN)
 
 
-def test_integration_plain_sql_is_still_refused_with_a_reason():
-    """Plain SQL has no header, so the major version cannot be read out of it
-    -- and version-matching is the thing this tool is built on."""
+def test_integration_plain_sql_refuses_a_partial_tier():
+    """A plain dump can only be restored whole; a fast or sample tier would
+    quietly be a full one."""
     needs_docker()
-    report = drill.run(corpus("not_an_archive.sql"))
-    check("rule", [f.rule for f in report.findings], ["ARCHIVE_UNREADABLE"])
+    report = drill.run(corpus("healthy.sql"), cfg=config.loads("version: 1\ntier: fast\n"))
+    check("rule", [f.rule for f in report.findings], ["TIER_UNSUPPORTED"])
     check("no container was started", report.stage("target").status, drill.NOT_RUN)
 
 

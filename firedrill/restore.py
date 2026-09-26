@@ -187,6 +187,57 @@ def parse_stderr(stderr: str, exit_code: int) -> tuple[list[Finding], int]:
     return findings, errors_ignored
 
 
+# psql's own error format, measured on PostgreSQL 16:
+#   psql:/firedrill/dump:48: ERROR:  role "appuser" does not exist
+#   psql:<stdin>:48: ERROR:  ...        (when the dump is piped in, gzipped)
+_PSQL_LINE = re.compile(r"^psql:[^:]*(?::\d+)?:\s*(ERROR|FATAL|WARNING):\s*(.*)$", re.I)
+
+
+def parse_psql_stderr(stderr: str) -> list[Finding]:
+    """Findings from psql restoring a plain-SQL dump. Pure, like
+    parse_stderr, and with the same classification -- but no exit-code
+    backstop: psql with ON_ERROR_STOP=0 exits 0 whatever happens (measured:
+    a missing role, exit 0), so every error has to come from here.
+
+    Non-psql lines count too: gunzip reports a cut-off .gz as
+    "unexpected end of file" before psql ever sees the missing data.
+    """
+    findings: list[Finding] = []
+    seen: set[tuple[str, str]] = set()
+    for raw in (stderr or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        m = _PSQL_LINE.match(line)
+        if m:
+            level, message = m.group(1).upper(), m.group(2).strip()
+        elif line.lower().startswith(("gzip:", "gunzip:")):
+            level, message = "ERROR", line
+        else:
+            continue
+        hit = classify(message)
+        if hit:
+            rule, severity, fix = hit
+        elif level == "WARNING":
+            rule, severity, fix = (
+                "RESTORE_WARNING", "medium",
+                "psql warned while applying the dump. Warnings here are findings, "
+                "not noise; confirm the restored object set is what you expect.")
+        else:
+            rule, severity, fix = (
+                "RESTORE_ERROR", "high",
+                "A statement in the dump failed to apply. psql carried on and "
+                "exited 0, so nothing but this line records that the object it "
+                "was creating is missing.")
+        key = (rule, message[:120])
+        if key in seen:
+            continue
+        seen.add(key)
+        findings.append(Finding(stage="restore", rule=rule, severity=severity,
+                                message=message, fix=fix, evidence=line))
+    return findings
+
+
 class _Combined:
     """The outcome of several pg_restore passes, read as one."""
 
@@ -197,7 +248,7 @@ class _Combined:
 
 
 def run_restore(container, jobs: int = 1, tier: str = "full",
-                tables=()) -> RestoreResult:
+                tables=(), plain: bool = False, gzipped: bool = False) -> RestoreResult:
     """Restore the mounted archive inside the container, and time it.
 
     `tier` is "full" or "fast". A fast run passes --schema-only, which
@@ -221,6 +272,9 @@ def run_restore(container, jobs: int = 1, tier: str = "full",
                 evidence=(created.stderr or created.stdout or "").strip(),
             )],
         )
+
+    if plain:
+        return _restore_plain(container, gzipped)
 
     base = ["pg_restore", "-U", "postgres", "-d", TARGET_DB, "--no-password"]
     if jobs > 1:
@@ -255,6 +309,34 @@ def run_restore(container, jobs: int = 1, tier: str = "full",
         stderr=result.stderr or "", errors_ignored=errors_ignored,
         findings=findings,
     )
+
+
+def _restore_plain(container, gzipped: bool) -> RestoreResult:
+    """psql, not pg_restore: plain SQL is a script. ON_ERROR_STOP=0 so one
+    failed statement doesn't hide every later one -- the same carry-on
+    behaviour pg_restore has -- and -o /dev/null because the script's own
+    SELECTs (set_config) print rows nobody needs. The exit code is then
+    derived from the findings, since psql's own says nothing."""
+    from .docker import DUMP_PATH
+
+    psql = f"psql -U postgres -X -q -v ON_ERROR_STOP=0 -o /dev/null -d {TARGET_DB}"
+    reader = "gunzip -c" if gzipped else "cat"
+    start = time.monotonic()
+    # As root, like every pg_restore call: this is the step that reads the
+    # mounted backup, which the container's postgres uid often can't.
+    result = container.exec(["sh", "-c", f"{reader} {DUMP_PATH} | {psql}"], user="root")
+    seconds = time.monotonic() - start
+    findings = parse_psql_stderr(result.stderr or "")
+    failed = result.returncode != 0 or any(f.severity in ("high", "critical") for f in findings)
+    if result.returncode != 0 and not findings:
+        findings.append(Finding(
+            stage="restore", rule="RESTORE_FAILED", severity="critical",
+            message=f"psql exited {result.returncode} without a message firedrill could classify.",
+            fix="Read the captured stderr below. An unexplained non-zero exit is "
+                "not evidence of success.",
+            evidence=(result.stderr or "").strip() or "(no stderr captured)"))
+    return RestoreResult(exit_code=1 if failed else 0, seconds=seconds,
+                         stderr=result.stderr or "", errors_ignored=0, findings=findings)
 
 
 def smoke(container) -> tuple[list[Finding], dict]:

@@ -441,32 +441,56 @@ def _run(dump_path: str | pathlib.Path | None = None, *, flavour: str = "",
         report.total_seconds = time.monotonic() - began
         return report
 
-    # custom (-Fc), directory (-Fd) and tar (-Ft) all carry a PGDMP header and
-    # are all restorable by pg_restore. Plain SQL is not: it has no header, so
-    # the major version cannot be read out of it, and version-matching is the
-    # thing this tool is built on.
+    # custom (-Fc), directory (-Fd) and tar (-Ft) carry a PGDMP header and are
+    # restored by pg_restore; plain SQL (-Fp, optionally gzipped) is restored
+    # by psql, its version read from pg_dump's own header comment.
     if header.format not in archive.RESTORABLE_FORMATS:
         stage("inspect").status = FAILED
         stage("inspect").seconds = time.monotonic() - started
         report.findings.append(Finding(
             stage="inspect", rule="FORMAT_UNSUPPORTED", severity="critical",
-            message=f"archive is {header.format_name} format; Phase 0 handles "
-                    f"custom (-Fc) only",
-            fix="Re-dump with `pg_dump -Fc`, or wait for the phase that adds the "
-                "other formats. Reported rather than skipped so this can never "
-                "look like a pass.",
+            message=f"archive is {header.format_name} format, which firedrill "
+                    f"can't restore (custom, directory, tar and plain SQL it can)",
+            fix="Re-dump with `pg_dump -Fc`. Reported rather than skipped so this "
+                "can never look like a pass.",
             evidence="",
         ))
         report.total_seconds = time.monotonic() - began
         return report
 
+    plain = header.format == archive.FORMAT_PLAIN
+
+    def _stop(rule: str, message: str, fix: str) -> Report:
+        stage("inspect").status = FAILED
+        stage("inspect").seconds = time.monotonic() - started
+        report.findings.append(Finding(stage="inspect", rule=rule, severity="critical",
+                                       message=message, fix=fix, evidence=str(dump_path)))
+        report.total_seconds = time.monotonic() - began
+        return report
+
+    if plain and not header.server_version and not pin_major:
+        return _stop(
+            "VERSION_UNKNOWN",
+            "this plain-SQL dump has no '-- Dumped from database version' line, so "
+            "the PostgreSQL version it came from is unknown",
+            "Pass --postgres MAJOR with the version the backup was taken on. "
+            "firedrill won't guess: the wrong version restores differently.")
+    if plain and cfg.tier != "full":
+        return _stop(
+            "TIER_UNSUPPORTED",
+            f"the {cfg.tier} tier restores part of a dump, and a plain-SQL dump can "
+            "only be restored whole",
+            "Run it with --tier full, or take the backup with `pg_dump -Fc` to get "
+            "the fast and sample tiers.")
+
     major = pin_major or header.server_major
     report.archive = {
-        "archive_version": ".".join(str(n) for n in header.archive_version),
+        "archive_version": ("plain" if plain else
+                            ".".join(str(n) for n in header.archive_version)),
         "format": header.format_name,
         "source_dbname": header.dbname,
         "server_version": header.server_version,
-        "server_major": header.server_major,
+        "server_major": header.server_major if header.server_version else None,
         # What we will ask for. Overwritten below with what the server
         # actually reports, once there is a server to ask.
         "target_major_requested": major,
@@ -476,7 +500,19 @@ def _run(dump_path: str | pathlib.Path | None = None, *, flavour: str = "",
     # A pinned major that disagrees with the archive is knowable here, before
     # a container is started, and it explains a failure that otherwise arrives
     # as a generic "could not execute query" several stages later.
-    if pin_major and pin_major != header.server_major:
+    if plain and not header.complete:
+        # Measured: psql restores a cut-off plain dump with exit 0 and no error,
+        # and the table comes back short. The file is the only witness.
+        report.findings.append(Finding(
+            stage="inspect", rule="ARCHIVE_TRUNCATED", severity="critical",
+            message="the plain-SQL dump doesn't end with pg_dump's '-- PostgreSQL "
+                    "database dump complete' line: it was cut off",
+            fix="The backup is incomplete -- the job most likely ran out of disk or "
+                "was killed. psql restores a truncated dump without any error, so "
+                "the restore below will look clean while missing data.",
+            evidence=str(dump_path)))
+
+    if pin_major and header.server_version and pin_major != header.server_major:
         older = _is_older(pin_major, header.server_major)
         report.findings.append(Finding(
             stage="inspect", rule="VERSION_MISMATCH",
@@ -554,7 +590,8 @@ def _run(dump_path: str | pathlib.Path | None = None, *, flavour: str = "",
 
         # -- restore -------------------------------------------------------
         result = restore_stage.run_restore(container, jobs=cfg.jobs, tier=cfg.tier,
-                                           tables=cfg.sample_tables)
+                                           tables=cfg.sample_tables, plain=plain,
+                                           gzipped=header.gzipped)
         report.findings.extend(result.findings)
         stage("restore").seconds = result.seconds
         stage("restore").status = OK if result.exit_code == 0 else FAILED

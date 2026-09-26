@@ -290,6 +290,21 @@ def build(outdir: pathlib.Path = DEFAULT_OUT) -> dict:
                 made["healthy_dir"] = src.dump(outdir / "healthy_dir", fmt="-Fd")
                 made["healthy_tar"] = src.dump(outdir / "healthy.tar", fmt="-Ft")
 
+                # -- plain SQL (`pg_dump > backup.sql`), whole and cut off,
+                # bare and gzipped. Truncated at half the file: measured, psql
+                # restores that with exit 0 and no error, rows silently short.
+                import gzip
+                plain = src.dump(outdir / "healthy.sql", plain=True)
+                made["healthy_sql"] = plain
+                text = plain.read_bytes()
+                (outdir / "truncated.sql").write_bytes(text[: len(text) // 2])
+                made["truncated_sql"] = outdir / "truncated.sql"
+                packed = gzip.compress(text)
+                (outdir / "healthy.sql.gz").write_bytes(packed)
+                (outdir / "truncated.sql.gz").write_bytes(packed[: len(packed) // 2])
+                made["healthy_sql_gz"] = outdir / "healthy.sql.gz"
+                made["truncated_sql_gz"] = outdir / "truncated.sql.gz"
+
             # A committed 512-byte header, so the pure-Python parser can be
             # tested on a machine that cannot run Linux containers at all.
             (HEADERS_OUT / f"pg{major}.header").write_bytes(
