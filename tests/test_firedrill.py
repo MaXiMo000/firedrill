@@ -245,6 +245,154 @@ def test_image_template_for_extension_databases():
     check("config carries the template", cfg.image, "postgis/postgis:{major}-3.5")
 
 
+# ---------------------------------------------------------------- physical --
+
+# Copied from a real pgBackRest 2.59.1 repository (checksum line trimmed).
+PGBACKREST_INFO = """[backrest]
+backrest-format=5
+backrest-version="2.59.1"
+
+[backup:current]
+20260926-202837F={"backrest-format":5,"backup-error":false,"backup-timestamp-start":1790454517,"backup-timestamp-stop":1790454536,"backup-type":"full"}
+
+[db]
+db-catalog-version=202307071
+db-id=1
+db-version="16"
+"""
+
+
+def test_physical_reads_the_backup_from_the_repository():
+    """Major version and newest backup come from the repository itself, as
+    they come from a dump header -- never from the host."""
+    import tempfile
+    from firedrill import physical
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = pathlib.Path(tmp)
+        (repo / "backup" / "demo").mkdir(parents=True)
+        (repo / "backup" / "demo" / "backup.info").write_text(PGBACKREST_INFO)
+        meta = physical.pgbackrest_backup(repo, None)
+        check("stanza found", meta["stanza"], "demo")
+        check("major from db-version", meta["major"], "16")
+        check("newest set", meta["label"], "20260926-202837F")
+
+        walg = repo / "basebackups_005"
+        walg.mkdir()
+        (walg / "base_000000010000000000000003_backup_stop_sentinel.json").write_text(
+            '{"PgVersion":160015,"FinishTime":"2026-09-26T20:30:21.644694Z"}')
+        meta = physical.walg_backup(repo, None)
+        check("walg major from PgVersion", (meta["major"], meta["label"]),
+              ("16", "base_000000010000000000000003"))
+
+
+def test_physical_never_archives_into_the_repository_it_checks():
+    """A restored data directory carries production's archive_command."""
+    from firedrill import physical
+    for tool in physical.TOOLS:
+        script = physical.script_for(tool, repo=True, stanza="demo", backup=None, target=None)
+        check(f"{tool}: server started with archive_mode=off", "postgres -c archive_mode=off" in script, True)
+    try:
+        physical.script_for("pgbackrest", repo=True, stanza="demo; rm -rf /", backup=None, target=None)
+        check("an injected stanza is refused", "accepted", "PhysicalError")
+    except physical.PhysicalError:
+        pass
+    try:
+        physical.script_for("walg", repo=True, stanza=None, backup=None,
+                            target="2026-01-01 00:00:00'; archive_command='x")
+        check("an injected target is refused", "accepted", "PhysicalError")
+    except physical.PhysicalError:
+        pass
+
+
+def test_physical_staleness_and_tool_errors_read_plainly():
+    import datetime as dt
+    from firedrill import physical
+    now = dt.datetime(2026, 9, 27, tzinfo=dt.timezone.utc)
+    stale = physical.age_finding(now - dt.timedelta(hours=30), 26 * 3600, now=now)
+    check("stale", [f.rule for f in stale], ["BACKUP_STALE"])
+    check("readable span", "30.0h" in stale[0].message and "26.0h" in stale[0].message, True)
+    check("fresh", physical.age_finding(now - dt.timedelta(hours=2), 26 * 3600, now=now), [])
+    check("pgBackRest's own reason", physical.tool_error(
+        "2026 P00 ERROR: [029]: raised from local-1 protocol: zlib threw error: [-3] data error"),
+        "[029]: raised from local-1 protocol: zlib threw error: [-3] data error")
+
+
+def test_physical_restores_real_pgbackrest_and_walg_repositories():
+    """Repositories made by pgBackRest and WAL-G themselves. Replaying all WAL
+    brings back all three tables; recovering to the timestamp brings back the
+    one before it and not the one after; a timestamp past the archive fails."""
+    needs_docker()
+    import make_physical
+    built = make_physical.build(CORPUS / "physical")
+    cfg = config.loads(
+        "version: 1\nsemantics:\n"
+        "  - name: before\n    sql: select count(*) from pg_class where relname = 'before_target'\n"
+        "    expect: \"== 1\"\n"
+        "  - name: after\n    sql: select count(*) from pg_class where relname = 'after_target'\n"
+        "    expect: \"== 0\"\n")
+    for tool, (repo, target) in built.items():
+        full = drill.run_physical(tool, repo=repo)
+        check(f"{tool}: full replay passes", full.ok, True)
+        check(f"{tool}: all tables back", "shop: 3 table(s)" in full.stages[1].detail, True)
+        pitr_run = drill.run_physical(tool, repo=repo, target=target, cfg=cfg)
+        check(f"{tool}: recovered exactly to the boundary", pitr_run.ok, True)
+        # A day past the archive's end -- not 2099: pgBackRest 2.59 answers a
+        # post-2038 target with [075], as if no backup preceded it.
+        import datetime as dt
+        after = (dt.datetime.fromisoformat(target.replace("+00", "+00:00"))
+                 + dt.timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S+00")
+        late = drill.run_physical(tool, repo=repo, target=after)
+        check(f"{tool}: a target past the archive fails", [f.rule for f in late.findings],
+              ["PITR_TARGET_UNREACHED"])
+        early = drill.run_physical(tool, repo=repo, target="2020-01-01 00:00:00+00")
+        check(f"{tool}: a target before every backup says so", [f.rule for f in early.findings],
+              ["PITR_TARGET_BEFORE_BACKUP"])
+        check(f"{tool}: and that is a FAIL, not could-not-verify", early.verified, True)
+
+
+def test_notify_posts_the_verdict_to_a_real_webhook():
+    """A real HTTP receiver on localhost. Failing and could-not-verify runs
+    notify; a pass does not unless asked; the URL never reaches an error."""
+    import http.server
+    import os
+    import threading
+    from firedrill import notify
+    got = []
+
+    class Hook(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            got.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            self.send_response(204 if self.path == "/ok" else 500)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Hook)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        os.environ["FD_HOOK"] = base + "/ok"
+        failed = _blank_report(verified=True, findings=[Finding("restore", "ARCHIVE_TRUNCATED", "critical", "cut short")])
+        check("a failure notifies", notify.send(failed, "FD_HOOK"), True)
+        check("Slack and Discord both read it", (got[0]["text"] == got[0]["content"],
+                                                  "ARCHIVE_TRUNCATED" in got[0]["text"]), (True, True))
+        check("could-not-verify notifies", notify.send(_blank_report(verified=False), "FD_HOOK"), True)
+        check("COULD NOT VERIFY is named", got[1]["text"].startswith("firedrill COULD NOT VERIFY"), True)
+        passed = _blank_report(verified=True)
+        check("a pass is quiet by default", notify.send(passed, "FD_HOOK"), False)
+        check("unless asked", notify.send(passed, "FD_HOOK", "always"), True)
+        os.environ["FD_HOOK"] = base + "/broken"
+        try:
+            notify.send(failed, "FD_HOOK")
+            check("a refused webhook is an error", "sent", "NotifyError")
+        except notify.NotifyError as exc:
+            check("and the URL stays out of the message", base in str(exc), False)
+    finally:
+        server.shutdown()
+        os.environ.pop("FD_HOOK", None)
+
+
 def test_live_dsn_never_prints_the_password():
     import os
     from firedrill import finding, sources
@@ -2620,7 +2768,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 151
+    FLOOR = 155
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "

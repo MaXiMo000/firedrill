@@ -31,7 +31,17 @@ def human(report: Report, colour: bool = False) -> str:
     lines = []
     a = report.archive
     lines.append(f"firedrill  {report.dump}")
-    if a.get("recovery_target_time"):
+    if a.get("tool"):
+        # pgBackRest / WAL-G: a backup set in a repository, not an archive file.
+        name = {"pgbackrest": "pgBackRest", "walg": "WAL-G"}[a["tool"]]
+        stanza = f"  stanza {a['stanza']}" if a.get("stanza") else ""
+        finished = f"  finished {a['finished']}" if a.get("finished") else ""
+        lines.append(f"  backup    {name} {a.get('label')}{stanza}{finished}")
+        towards = (f"recovered to {a['recovery_target_time']}" if a.get("recovery_target_time")
+                   else "WAL replayed to the end of the archive")
+        lines.append(f"  source    PostgreSQL {a.get('server_major')}  -> {towards} "
+                     f"on postgres:{a.get('restored_into_major')}")
+    elif a.get("recovery_target_time"):
         # A PITR run has no archive to describe. Printing the dump fields here
         # rendered "archive None vNone 0B from None", which is worse than
         # printing nothing: it looks like a parse that went wrong.
@@ -118,6 +128,8 @@ def _verdict(report: Report) -> str:
         # run proved the schema comes back and nothing more.
         return ("PASS (fast tier) -- the schema restored. Whether the DATA is "
                 "there was not checked.")
+    if report.ok and report.archive.get("tool") and not report.archive.get("recovery_target_time"):
+        return "PASS -- restored with the backup tool, WAL replayed, and it answered queries."
     if report.ok and report.stages and report.stages[0].name == "recover":
         return ("PASS -- recovered to the target, and the boundary is where it "
                 "should be.")
