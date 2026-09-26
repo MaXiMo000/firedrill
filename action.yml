@@ -18,6 +18,23 @@ inputs:
       a source; giving both is refused rather than guessed at.
     required: false
     default: ""
+  live:
+    description: >-
+      Name of an environment variable holding a postgres:// URL. firedrill
+      takes a fresh pg_dump of that database and drills it -- set the
+      variable from a secret with `env:` on the step, never the URL here.
+    required: false
+    default: ""
+  keep:
+    description: With `live`, a folder to keep the fresh dump in (upload it as an artifact).
+    required: false
+    default: ""
+  image:
+    description: >-
+      Restore image with a {major} slot, e.g. pgvector/pgvector:pg{major},
+      for databases using extensions the stock postgres image lacks.
+    required: false
+    default: ""
   config:
     description: Path to firedrill.yml. Defaults to one beside the checkout.
     required: false
@@ -103,6 +120,9 @@ runs:
         set -uo pipefail
         args=(run)
         [ -n "${{ inputs.dump }}" ]     && args+=("${{ inputs.dump }}")
+        [ -n "${{ inputs.live }}" ]     && args+=(--live "${{ inputs.live }}")
+        [ -n "${{ inputs.keep }}" ]     && args+=(--keep "${{ inputs.keep }}")
+        [ -n "${{ inputs.image }}" ]    && args+=(--image "${{ inputs.image }}")
         [ -n "${{ inputs.config }}" ]   && args+=(--config "${{ inputs.config }}")
         [ -n "${{ inputs.tier }}" ]     && args+=(--tier "${{ inputs.tier }}")
         [ -n "${{ inputs.rto }}" ]      && args+=(--rto "${{ inputs.rto }}")

@@ -1,0 +1,43 @@
+# For a database with no backup job yet: every night, take a fresh pg_dump,
+# prove it restores, and keep it as a workflow artifact. Change the lines
+# marked CHANGE ME.
+#
+# The runner must be able to reach the database. For a managed database
+# that is an allow-listed IP or a self-hosted runner; firedrill never opens
+# anything towards it but a read-only pg_dump.
+
+name: nightly backup and drill
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  drill:
+    runs-on: ubuntu-latest    # CHANGE ME if the database is only reachable from your network
+    steps:
+      - uses: MaXiMo000/firedrill@v0    # CHANGE ME to a tag or commit SHA
+        env:
+          # CHANGE ME: a read-only role's URL, from a secret. The action is
+          # given the variable's *name*, so the URL never reaches a log line.
+          DATABASE_URL: ${{ secrets.READONLY_DATABASE_URL }}
+        with:
+          live: DATABASE_URL
+          keep: backups
+          # image: pgvector/pgvector:pg{major}   # if you use pgvector
+
+      # Artifacts are downloadable by anyone who can read the repository --
+      # on a PUBLIC repository, that is everyone. Only upload the dump from a
+      # private repository; otherwise push `backups/` to your own storage.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: postgres-backup
+          path: |
+            backups/
+            firedrill-report.json
+          retention-days: 14
