@@ -312,9 +312,18 @@ def run_physical(tool: str, *, repo=None, stanza=None, backup=None, target=None,
             return stop("PITR_TARGET_INVALID", str(exc), "Nothing was started.", status=NOT_RUN)
     try:
         meta = physical.describe(tool, pathlib.Path(repo) if repo else None,
-                                 stanza, backup, pin_major)
-        script = physical.script_for(tool, repo=repo is not None, stanza=meta.get("stanza"),
-                                     backup=backup, target=target)
+                                 stanza, backup, pin_major, target)
+        # WAL-G fetches exactly the base backup chosen here -- for a PITR run,
+        # the newest one that finished before the target.
+        script = physical.script_for(
+            tool, repo=repo is not None, stanza=meta.get("stanza"),
+            backup=meta["label"] if tool == "walg" and repo else backup, target=target)
+    except physical.TargetBeforeBackup as exc:
+        return stop("PITR_TARGET_BEFORE_BACKUP", f"{exc}, so {target} cannot be recovered",
+                    "Postgres cannot stop recovery before a backup's end: asked to, it "
+                    "refuses -- or, when nothing committed during the backup, silently "
+                    "recovers to a LATER moment. Retention has removed the backup this "
+                    "moment needs, or none was ever taken before it.")
     except physical.PhysicalError as exc:
         return stop("BACKUP_UNREADABLE", f"the backup could NOT be verified: {exc}",
                     "Nothing was restored.", status=NOT_RUN)
@@ -373,6 +382,14 @@ def run_physical(tool: str, *, repo=None, stanza=None, backup=None, target=None,
 
         promoted = pitr.confirm_promoted(container)
         stage("recover").seconds = time.monotonic() - started
+        if promoted and pitr._TARGET_UNREACHED in container.logs(tail=200):
+            # Postgres serves read-only queries during recovery, so the server
+            # can look ready and then exit because the archive ran out.
+            return stop("PITR_TARGET_UNREACHED",
+                        f"recovery could not reach {target}: the WAL archive ends before it",
+                        "The base backup and the archived WAL cannot reconstruct that "
+                        "moment -- the failure you would meet during the incident.",
+                        pitr._recovery_trace(container.logs(tail=200)))
         if promoted:
             report.findings.extend(promoted)
             stage("recover").status = FAILED

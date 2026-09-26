@@ -52,6 +52,25 @@ class PhysicalError(Exception):
     """The backup could not be located or read before anything started."""
 
 
+class TargetBeforeBackup(PhysicalError):
+    """No backup finished at or before the recovery target. Postgres cannot
+    stop recovery before a backup's end: asked to, it either refuses or --
+    when nothing committed during the backup -- quietly recovers to a LATER
+    moment than the one asked for. Decided here, from the repository."""
+
+
+def parse_target(target: str) -> dt.datetime:
+    """A validated target as an aware datetime; no offset means UTC, which
+    is the restore container's zone."""
+    text = target.strip().replace(" ", "T", 1)
+    if re.search(r"[+-]\d\d$", text):
+        text += ":00"
+    elif text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    moment = dt.datetime.fromisoformat(text)
+    return moment if moment.tzinfo else moment.replace(tzinfo=dt.timezone.utc)
+
+
 # -- reading the repository ------------------------------------------------
 
 def _ini_section(text: str, section: str) -> dict[str, str]:
@@ -66,7 +85,7 @@ def _ini_section(text: str, section: str) -> dict[str, str]:
     return out
 
 
-def pgbackrest_backup(repo: pathlib.Path, stanza: str | None) -> dict:
+def pgbackrest_backup(repo: pathlib.Path, stanza: str | None, before=None) -> dict:
     """{stanza, major, label, finished} for the newest backup, read from the
     repository's own backup.info -- the same principle as reading a dump
     header: ask the artefact, not the host."""
@@ -86,14 +105,21 @@ def pgbackrest_backup(repo: pathlib.Path, stanza: str | None) -> dict:
     current = _ini_section(text, "backup:current")
     if not major or not current:
         raise PhysicalError(f"{info_path} lists no backups")
-    label, raw = max(current.items(), key=lambda kv: json.loads(kv[1]).get("backup-timestamp-stop", 0))
+    sets = current.items()
+    if before is not None:
+        # pgBackRest restores from the newest set that stopped before the
+        # target; report that one, and refuse when there is none.
+        sets = [kv for kv in sets if json.loads(kv[1]).get("backup-timestamp-stop", 0) <= before.timestamp()]
+        if not sets:
+            raise TargetBeforeBackup(f"no backup in stanza {stanza!r} finished before {before.isoformat()}")
+    label, raw = max(sets, key=lambda kv: json.loads(kv[1]).get("backup-timestamp-stop", 0))
     meta = json.loads(raw)
     return {"stanza": stanza, "major": major, "label": label,
             "failed": bool(meta.get("backup-error")),
             "finished": dt.datetime.fromtimestamp(meta["backup-timestamp-stop"], dt.timezone.utc)}
 
 
-def walg_backup(repo: pathlib.Path, name: str | None) -> dict:
+def walg_backup(repo: pathlib.Path, name: str | None, before=None) -> dict:
     """{major, label, finished} for the named (or newest) base backup, from
     its stop sentinel."""
     sentinels = list((repo / "basebackups_005").glob("*_backup_stop_sentinel.json"))
@@ -110,11 +136,18 @@ def walg_backup(repo: pathlib.Path, name: str | None) -> dict:
         found = [f for f in found if f[0] == name]
         if not found:
             raise PhysicalError(f"no base backup named {name!r} in {repo}")
-    label, meta = max(found, key=lambda f: f[1].get("FinishTime", ""))
+    if before is not None:
+        found = [f for f in found if _finish(f[1]) <= before]
+        if not found:
+            raise TargetBeforeBackup(f"no base backup in {repo} finished before {before.isoformat()}")
+    label, meta = max(found, key=lambda f: _finish(f[1]))
     version = int(meta["PgVersion"])
     major = str(version // 10000) if version >= 100000 else f"{version // 10000}.{version // 100 % 100}"
-    finished = dt.datetime.fromisoformat(meta["FinishTime"].replace("Z", "+00:00"))
-    return {"major": major, "label": label, "failed": False, "finished": finished}
+    return {"major": major, "label": label, "failed": False, "finished": _finish(meta)}
+
+
+def _finish(meta: dict) -> dt.datetime:
+    return dt.datetime.fromisoformat(meta["FinishTime"].replace("Z", "+00:00"))
 
 
 # -- the container ---------------------------------------------------------
@@ -231,13 +264,15 @@ def script_for(tool: str, *, repo: bool, stanza: str | None, backup: str | None,
 
 
 def describe(tool: str, repo: pathlib.Path | None, stanza: str | None,
-             backup: str | None, major: str | None) -> dict:
+             backup: str | None, major: str | None, target: str | None = None) -> dict:
     """What is about to be restored. A local repository says for itself; a
     remote one needs --postgres, since firedrill will not guess a major."""
     if repo is not None:
         if not repo.is_dir():
             raise PhysicalError(f"{repo} is not a directory")
-        meta = pgbackrest_backup(repo, stanza) if tool == "pgbackrest" else walg_backup(repo, backup)
+        before = parse_target(target) if target else None
+        meta = (pgbackrest_backup(repo, stanza, before) if tool == "pgbackrest"
+                else walg_backup(repo, backup, before))
         if major and major != meta["major"]:
             meta["pinned_from"] = meta["major"]
             meta["major"] = major

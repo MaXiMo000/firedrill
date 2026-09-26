@@ -284,6 +284,24 @@ def test_physical_reads_the_backup_from_the_repository():
         check("walg major from PgVersion", (meta["major"], meta["label"]),
               ("16", "base_000000010000000000000003"))
 
+        # PITR picks the newest backup that finished before the target, and a
+        # target before every backup is refused up front. CI showed why: with
+        # no commit during the backup, Postgres recovered to a LATER moment.
+        (walg / "base_000000010000000000000009_backup_stop_sentinel.json").write_text(
+            '{"PgVersion":160015,"FinishTime":"2026-09-27T08:00:00Z"}')
+        between = physical.parse_target("2026-09-27 01:00:00+00")
+        check("the backup before the target", physical.walg_backup(repo, None, between)["label"],
+              "base_000000010000000000000003")
+        check("no target: the newest", physical.walg_backup(repo, None)["label"],
+              "base_000000010000000000000009")
+        for tool, fn in (("walg", lambda b: physical.walg_backup(repo, None, b)),
+                         ("pgbackrest", lambda b: physical.pgbackrest_backup(repo, None, b))):
+            try:
+                fn(physical.parse_target("2020-01-01 00:00:00"))
+                check(f"{tool}: a target before every backup is refused", "accepted", "TargetBeforeBackup")
+            except physical.TargetBeforeBackup:
+                pass
+
 
 def test_physical_never_archives_into_the_repository_it_checks():
     """A restored data directory carries production's archive_command."""
@@ -336,8 +354,8 @@ def test_physical_restores_real_pgbackrest_and_walg_repositories():
         check(f"{tool}: all tables back", "shop: 3 table(s)" in full.stages[1].detail, True)
         pitr_run = drill.run_physical(tool, repo=repo, target=target, cfg=cfg)
         check(f"{tool}: recovered exactly to the boundary", pitr_run.ok, True)
-        # A day past the archive's end -- not 2099: pgBackRest 2.59 answers a
-        # post-2038 target with [075], as if no backup preceded it.
+        # A day past the archive's end -- not 2099: pgBackRest 2.59 answered a
+        # 2099 target with [075], as if no backup preceded it (cause unconfirmed).
         import datetime as dt
         after = (dt.datetime.fromisoformat(target.replace("+00", "+00:00"))
                  + dt.timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S+00")
@@ -1016,11 +1034,13 @@ def test_action_yml_passes_only_flags_the_cli_actually_has():
             used.update(re.findall(r"--[a-z][a-z-]*", line))
     check("the action passes some flags", len(used) >= 5, True)
 
+    # The action calls `run` or `physical`; each flag must exist in one.
     known = set()
-    for action in build_parser()._subparsers._group_actions[0].choices["run"]._actions:
-        known.update(action.option_strings)
+    for command in ("run", "physical"):
+        for action in build_parser()._subparsers._group_actions[0].choices[command]._actions:
+            known.update(action.option_strings)
     missing = sorted(used - known)
-    check(f"every flag exists in `firedrill run` (missing: {missing})", missing, [])
+    check(f"every flag exists in `firedrill run` or `physical` (missing: {missing})", missing, [])
 
 
 def test_action_shell_scripts_are_valid_bash():
