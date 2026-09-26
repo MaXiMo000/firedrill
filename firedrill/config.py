@@ -123,11 +123,11 @@ class SemanticCheck:
         return f"{self.op} {self.threshold}"
 
 
-IMPLEMENTED_SOURCES = ("local", "https", "s3")
+IMPLEMENTED_SOURCES = ("local", "https", "s3", "live")
 # gcs is PLAN.md §9 Phase 2 as written, and is refused rather than half-built:
 # there is no way to verify it here, and an unverified source is a way to fail
 # to fetch a backup while reporting something reassuring.
-ALL_SOURCES = ("local", "https", "s3", "gcs")
+ALL_SOURCES = ("local", "https", "s3", "live", "gcs")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -143,6 +143,8 @@ class Source:
     region: str | None = None
     sha256: str | None = None
     size: int | None = None
+    url_env: str | None = None     # live: the variable holding the database URL
+    keep: str | None = None        # live: a folder to keep the fresh dump in
 
 
 @dataclasses.dataclass(frozen=True)
@@ -166,6 +168,7 @@ class Config:
     ignore: dict = dataclasses.field(default_factory=dict)
     source: Source | None = None
     path: pathlib.Path | None = None
+    image: str | None = None
 
     def is_ignored(self, rule: str) -> bool:
         return rule in self.ignore
@@ -208,7 +211,13 @@ def loads(text: str, path: pathlib.Path | None = None) -> Config:
 
     # -- target ------------------------------------------------------------
     target = _require_mapping(raw.get("target"), "target")
-    _reject_unknown(target, ("type", "postgres"), "target")
+    _reject_unknown(target, ("type", "postgres", "image"), "target")
+    image = target.get("image")
+    if image is not None and "{major}" not in str(image):
+        raise ConfigError(
+            "target.image needs a {major} slot, e.g. 'pgvector/pgvector:pg{major}'. "
+            "A fixed tag would restore every dump into one version, which is "
+            "the mismatch this tool exists to avoid.")
     target_type = target.get("type", "docker")
     if target_type != "docker":
         raise ConfigError(
@@ -333,7 +342,7 @@ def loads(text: str, path: pathlib.Path | None = None) -> Config:
 
     return Config(
         version=1,
-        source=source,
+        source=source, image=image,
         tier=tier,
         rto_budget=rto_budget,
         history_path=history_path,
@@ -349,7 +358,7 @@ def loads(text: str, path: pathlib.Path | None = None) -> Config:
 
 
 _SOURCE_KEYS = ("type", "path", "url", "bucket", "key", "prefix", "select",
-                "endpoint_url", "region", "sha256", "size")
+                "endpoint_url", "region", "sha256", "size", "url_env", "keep")
 
 # Which keys make sense for which type. Naming a key the chosen source cannot
 # use is an error: it means the user believes they configured something that
@@ -359,6 +368,7 @@ _SOURCE_ALLOWED = {
     "https": {"type", "url", "sha256", "size"},
     "s3": {"type", "bucket", "key", "prefix", "select", "endpoint_url",
            "region", "sha256", "size"},
+    "live": {"type", "url_env", "keep"},
 }
 
 
@@ -392,6 +402,11 @@ def _parse_source(raw) -> Source | None:
         raise ConfigError("source.path is required for type: local")
     if kind == "https" and not raw.get("url"):
         raise ConfigError("source.url is required for type: https")
+    if kind == "live" and not raw.get("url_env"):
+        raise ConfigError(
+            "source.url_env is required for type: live -- the NAME of the "
+            "environment variable holding the database URL, e.g. DATABASE_URL. "
+            "The URL itself never goes in this file.")
     if kind == "s3":
         if not raw.get("bucket"):
             raise ConfigError("source.bucket is required for type: s3")
@@ -433,7 +448,7 @@ def _parse_source(raw) -> Source | None:
         bucket=raw.get("bucket"), key=raw.get("key"), prefix=raw.get("prefix"),
         endpoint_url=raw.get("endpoint_url"), region=raw.get("region"),
         sha256=str(sha).lower() if sha is not None else None,
-        size=size,
+        size=size, url_env=raw.get("url_env"), keep=raw.get("keep"),
     )
 
 

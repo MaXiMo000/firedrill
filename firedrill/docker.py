@@ -117,6 +117,12 @@ def image_for(major: str, flavour: str = "") -> str:
     the silent corruption PLAN.md §3.4 exists to detect. Defaulting to alpine
     would mean the default target poisons the tool's own flagship check.
     """
+    # A whole image with a {major} slot -- pgvector/pgvector:pg{major},
+    # postgis/postgis:{major}-3.5 -- for a database whose extensions the
+    # stock image does not carry. Restoring pagila into plain postgres:18
+    # loses its pgvector table, faithfully, and says so.
+    if "{major}" in flavour:
+        return flavour.format(major=major)
     return f"postgres:{major}{flavour}"
 
 
