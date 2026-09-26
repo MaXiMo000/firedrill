@@ -26,6 +26,9 @@ import shutil
 import urllib.error
 import urllib.parse
 import urllib.request
+from subprocess import PIPE as subprocess_PIPE
+
+from . import finding
 
 # Big enough that hashing is not the bottleneck, small enough that a 2 TB
 # artefact does not arrive in memory.
@@ -209,7 +212,109 @@ def _newest_key(client, source) -> str:
     return newest["Key"]
 
 
-_FETCHERS = {"local": _fetch_local, "https": _fetch_https, "s3": _fetch_s3}
+# -------------------------------------------------------------------- live --
+
+# pg_dump can dump any server at or below its own major, so the probe only
+# needs to be recent; the dump itself then runs from the server's own major.
+_PROBE_IMAGE = "postgres:17"
+_LOOPBACK = ("localhost", "127.0.0.1", "::1")
+
+
+def _live_dsn(source) -> tuple[str, str]:
+    """(dsn as the container sees it, a printable origin with no userinfo)."""
+    import os
+    dsn = os.environ.get(source.url_env or "")
+    if not dsn:
+        raise SourceError(
+            f"${source.url_env} is not set. The live source reads the database "
+            "URL from an environment variable, never from argv or the config, "
+            "because both end up in logs."
+        )
+    parts = urllib.parse.urlsplit(dsn)
+    if parts.scheme not in ("postgres", "postgresql"):
+        raise SourceError(f"${source.url_env} is not a postgres:// URL")
+    if parts.password:
+        finding.register_secret(parts.password)
+    host = parts.hostname or "localhost"
+    netloc = parts.netloc
+    if host in _LOOPBACK:
+        # Inside the container, localhost is the container. The host is
+        # host.docker.internal (mapped with --add-host on Linux).
+        userinfo, at, _ = netloc.rpartition("@")
+        netloc = f"{userinfo}{at}host.docker.internal" + (f":{parts.port}" if parts.port else "")
+    inside = urllib.parse.urlunsplit(parts._replace(netloc=netloc))
+    shown = f"postgres://{host}{f':{parts.port}' if parts.port else ''}{parts.path}"
+    return inside, shown
+
+
+def _pg(image: str, script: str, dsn: str, stdout=subprocess_PIPE, timeout=None):
+    import os
+    import subprocess
+    # The DSN goes in by *name*: docker inherits the value from our
+    # environment, so the password never appears in any argv.
+    argv = ["docker", "run", "--rm", "-i", "-e", "FIREDRILL_DSN",
+            "--add-host", "host.docker.internal:host-gateway",
+            image, "sh", "-c", script]
+    try:
+        return subprocess.run(argv, stdout=stdout, stderr=subprocess.PIPE,
+                              env={**os.environ, "FIREDRILL_DSN": dsn},
+                              timeout=timeout, check=False)
+    except FileNotFoundError:
+        raise SourceError("the live source runs pg_dump in a container, and "
+                          "`docker` is not on PATH") from None
+    except subprocess.TimeoutExpired:
+        raise SourceError(f"pg_dump did not finish within {timeout}s") from None
+
+
+def _fetch_live(source, workdir: pathlib.Path) -> Artifact:
+    """Take a fresh `pg_dump -Fc` of a running database, then drill that.
+
+    Read-only like every other source: pg_dump opens one repeatable-read
+    transaction and issues no writes. It runs from the server's own major
+    version, so nothing but Docker has to be installed.
+    """
+    import datetime
+    dsn, shown = _live_dsn(source)
+    probe = _pg(_PROBE_IMAGE, 'psql -d "$FIREDRILL_DSN" -XAtc "show server_version_num"',
+                dsn, timeout=120)
+    if probe.returncode != 0:
+        raise SourceError(f"could not connect to {shown}: "
+                          f"{finding.redact(probe.stderr.decode(errors='replace')).strip()[-300:]}")
+    major = str(int(probe.stdout.decode().strip()) // 10000)
+
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    database = urllib.parse.urlsplit(dsn).path.strip("/") or "postgres"
+    folder = pathlib.Path(source.keep).expanduser() if source.keep else workdir
+    folder.mkdir(parents=True, exist_ok=True)
+    destination = folder / f"{database}-{stamp}.dump"
+    with destination.open("wb") as handle:
+        dump = _pg(f"postgres:{major}", 'exec pg_dump -Fc --no-password -d "$FIREDRILL_DSN"',
+                   dsn, stdout=handle)
+    if dump.returncode != 0:
+        destination.unlink(missing_ok=True)
+        raise SourceError(f"pg_dump of {shown} failed: "
+                          f"{finding.redact(dump.stderr.decode(errors='replace')).strip()[-300:]}")
+
+    size, sha = _digest(destination)
+    return Artifact(path=destination, size=size, sha256=sha, origin=shown)
+
+
+def from_argument(arg: str):
+    """`s3://bucket/key`, or `s3://bucket/prefix/` for the newest object
+    under it. None for anything else, which is then a local path."""
+    from .config import Source
+    if not arg.startswith("s3://"):
+        return None
+    bucket, _, rest = arg[len("s3://"):].partition("/")
+    if not bucket:
+        raise SourceError(f"{arg} names no bucket")
+    if not rest or rest.endswith("/"):
+        return Source(type="s3", bucket=bucket, prefix=rest)
+    return Source(type="s3", bucket=bucket, key=rest)
+
+
+_FETCHERS = {"local": _fetch_local, "https": _fetch_https, "s3": _fetch_s3,
+             "live": _fetch_live}
 
 
 def fetch(source, workdir: pathlib.Path) -> Artifact:

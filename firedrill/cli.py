@@ -28,7 +28,17 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     run = sub.add_parser("run", help="restore a dump and report")
-    run.add_argument("dump", help="path to a pg_dump custom-format (-Fc) file")
+    run.add_argument("dump", nargs="?",
+                     help="the backup: a dump file or directory, or s3://bucket/key "
+                          "(s3://bucket/prefix/ takes the newest object). Omit it "
+                          "when firedrill.yml defines a source, or with --live.")
+    run.add_argument("--live", metavar="ENV_VAR",
+                     help="take a fresh pg_dump of a running database and drill "
+                          "that. Give the NAME of the variable holding its URL, "
+                          "e.g. --live DATABASE_URL; the URL never touches argv.")
+    run.add_argument("--keep", metavar="DIR",
+                     help="with --live: keep the fresh dump in DIR, so one "
+                          "command takes a backup and proves it restores")
     run.add_argument("--json", metavar="PATH",
                      help="write the machine-readable report here ('-' for stdout)")
     run.add_argument("--rto", metavar="DURATION",
@@ -41,6 +51,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--image-flavour", default="",
                      help="suffix for the postgres image, e.g. '-alpine'. Not the "
                           "default: musl libc breaks collation comparisons.")
+    run.add_argument("--image", metavar="TEMPLATE",
+                     help="restore into this image instead of postgres:MAJOR, with "
+                          "{major} filled in -- e.g. 'pgvector/pgvector:pg{major}' "
+                          "when the database uses extensions the stock image lacks")
     run.add_argument("--ready-timeout", type=int,
                      default=docker.DEFAULT_READY_TIMEOUT,
                      help="seconds to wait for the container (default: %(default)s)")
@@ -149,6 +163,11 @@ def main(argv: list[str] | None = None) -> int:
             if args.jobs < 1:
                 raise config.ConfigError(f"--jobs must be a positive integer, got {args.jobs}")
             cfg = dataclasses.replace(cfg, jobs=args.jobs)
+        if args.image and "{major}" not in args.image:
+            raise config.ConfigError(
+                "--image needs a {major} slot, e.g. 'pgvector/pgvector:pg{major}' -- "
+                "a fixed tag would restore every dump into one version")
+        cfg, args.dump = _resolve_source(cfg, args)
     except config.ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
@@ -157,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
         args.dump,
         cfg=cfg,
         write_reference=args.write_reference,
-        flavour=args.image_flavour,
+        flavour=args.image or cfg.image or args.image_flavour,
         rto_budget=_duration(args.rto) if args.rto else None,
         fail_on=args.fail_on,
         pin_major=args.postgres,
@@ -165,6 +184,35 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     return _emit(result, args)
+
+
+def _resolve_source(cfg, args):
+    """One artefact, named exactly one way: a path, an s3:// URL, --live, or
+    the config's source."""
+    from . import sources
+    if args.keep and not args.live:
+        raise config.ConfigError("--keep only applies to --live")
+    named = [n for n, given in (("a dump argument", args.dump), ("--live", args.live),
+                                ("a source in firedrill.yml", cfg.source)) if given]
+    if len(named) > 1:
+        raise config.ConfigError(
+            f"{' and '.join(named)} both name a backup. Give one -- guessing "
+            "which backup was meant is the one thing a restore tool must not do.")
+    if not named:
+        raise config.ConfigError(
+            "nothing to drill: give a dump path, an s3:// URL, --live ENV_VAR, "
+            "or define `source:` in firedrill.yml")
+    if args.live:
+        return dataclasses.replace(cfg, source=config.Source(
+            type="live", url_env=args.live, keep=args.keep)), None
+    if args.dump:
+        try:
+            remote = sources.from_argument(args.dump)
+        except sources.SourceError as exc:
+            raise config.ConfigError(str(exc)) from None
+        if remote:
+            return dataclasses.replace(cfg, source=remote), None
+    return cfg, args.dump
 
 
 def _emit(result, args) -> int:

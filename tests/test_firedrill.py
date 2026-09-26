@@ -194,6 +194,70 @@ def test_psql_stderr_is_classified_like_pg_restore():
         'psql:/firedrill/dump:48: ERROR:  role "appuser" does not exist\n')
     check("rules", [f.rule for f in got], ["ROLE_ABSENT", "RESTORE_ERROR", "ARCHIVE_TRUNCATED"])
     check("a clean restore says nothing", restore.parse_psql_stderr(""), [])
+    # Measured: `cat dump | psql` prints no `psql:<file>:<n>:` prefix at all.
+    # pagila restored into the wrong major this way and reported exit 0.
+    bare = restore.parse_psql_stderr(
+        "ERROR:  function uuidv7() does not exist\n"
+        "LINE 12:     uuid uuid DEFAULT uuidv7() NOT NULL\n"
+        "HINT:  No function matches the given name and argument types.\n"
+        'ERROR:  syntax error at or near "VIRTUAL"\n')
+    check("bare psql errors from a pipe are findings",
+          [f.rule for f in bare], ["RESTORE_ERROR", "RESTORE_ERROR"])
+
+
+def test_backup_named_one_way_from_the_command_line():
+    """s3:// on the command line, --live, a path, or the config -- exactly one."""
+    import argparse
+    from firedrill import cli, sources
+
+    s = sources.from_argument("s3://bk/nightly/")
+    check("trailing slash is a prefix", (s.type, s.bucket, s.prefix, s.key), ("s3", "bk", "nightly/", None))
+    s = sources.from_argument("s3://bk/db/2026-09-26.dump")
+    check("otherwise a key", (s.key, s.prefix), ("db/2026-09-26.dump", None))
+    check("a path is not remote", sources.from_argument("backups/x.dump"), None)
+
+    def resolve(dump=None, live=None, keep=None, cfg=config.DEFAULT):
+        return cli._resolve_source(cfg, argparse.Namespace(dump=dump, live=live, keep=keep))
+
+    cfg, dump = resolve(live="DATABASE_URL", keep="kept")
+    check("--live becomes a live source", (cfg.source.type, cfg.source.url_env, cfg.source.keep, dump),
+          ("live", "DATABASE_URL", "kept", None))
+    for kwargs, label in (({}, "nothing named"), ({"dump": "x", "live": "V"}, "two named"),
+                          ({"dump": "x", "keep": "k"}, "--keep without --live")):
+        try:
+            resolve(**kwargs)
+            check(label, "accepted", "ConfigError")
+        except config.ConfigError:
+            pass
+
+
+def test_image_template_for_extension_databases():
+    """pagila needs pgvector; the stock image restores it minus one table."""
+    check("stock image", docker.image_for("18"), "postgres:18")
+    check("suffix still works", docker.image_for("16", "-bookworm"), "postgres:16-bookworm")
+    check("template", docker.image_for("18", "pgvector/pgvector:pg{major}"), "pgvector/pgvector:pg18")
+    try:
+        config.loads("version: 1\ntarget:\n  image: pgvector/pgvector:pg18\n")
+        check("a fixed tag is refused", "accepted", "ConfigError")
+    except config.ConfigError:
+        pass
+    cfg = config.loads("version: 1\ntarget:\n  image: 'postgis/postgis:{major}-3.5'\n")
+    check("config carries the template", cfg.image, "postgis/postgis:{major}-3.5")
+
+
+def test_live_dsn_never_prints_the_password():
+    import os
+    from firedrill import finding, sources
+    os.environ["FD_TEST_URL"] = "postgresql://app:s3cretpw@localhost:5433/shop"
+    try:
+        inside, shown = sources._live_dsn(config.Source(type="live", url_env="FD_TEST_URL"))
+    finally:
+        del os.environ["FD_TEST_URL"]
+    check("loopback is the docker host inside the container", inside,
+          "postgresql://app:s3cretpw@host.docker.internal:5433/shop")
+    check("origin carries no credentials", shown, "postgres://localhost:5433/shop")
+    check("password is redacted from any error", "s3cretpw" in finding.redact("auth failed s3cretpw"), False)
+    finding.forget_secrets()
 
 
 def test_absurd_string_length_is_rejected():
@@ -396,6 +460,17 @@ def test_human_report_distinguishes_could_not_verify_from_fail():
     check("unverified wording", "COULD NOT VERIFY" in unverified, True)
     check("and is not called a failure", "FAIL --" in unverified, False)
     check("failure wording", "FAIL --" in failed, True)
+
+
+def test_a_stage_below_fail_on_reads_warn_not_fail():
+    """pagila: an unpopulated matview is medium, the run PASSes, and the
+    integrity line said [FAIL] directly above the PASS."""
+    report = _blank_report(verified=True, findings=[Finding("integrity", "MATVIEW_UNPOPULATED", "medium", "m")])
+    next(s for s in report.stages if s.name == "integrity").status = drill.FAILED
+    text = reporting.human(report)
+    check("warn, not FAIL", ("[warn] integrity" in text, "[FAIL] integrity" in text), (True, False))
+    report.findings[0] = Finding("integrity", "SEQUENCE_BEHIND", "high", "m")
+    check("a failing finding still reads FAIL", "[FAIL] integrity" in reporting.human(report), True)
 
 
 def test_human_report_marks_stages_that_did_not_run():
@@ -2545,7 +2620,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 136
+    FLOOR = 151
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "

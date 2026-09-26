@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 
 from .drill import FAILED, NOT_CONFIGURED, NOT_RUN, OK, Report
+from .finding import should_fail
 
 _MARK = {OK: "ok  ", FAILED: "FAIL", NOT_RUN: "----", NOT_CONFIGURED: "n/a "}
 
@@ -59,6 +60,11 @@ def human(report: Report, colour: bool = False) -> str:
         detail = f"  {stage.detail}" if stage.detail else ""
         timing = "     --" if stage.status in _NO_TIMING else f"{stage.seconds:6.2f}s"
         mark = _MARK.get(stage.status, _UNKNOWN_MARK)
+        # A stage whose findings all sit below --fail-on did not fail the run;
+        # "[FAIL]" above a PASS verdict reads as a contradiction.
+        own = [f for f in report.findings if f.stage == stage.name]
+        if stage.status == FAILED and own and not should_fail(own, report.fail_on):
+            mark = "warn"
         lines.append(f"  [{mark}] {stage.name:<9} {timing}{detail}")
 
     lines.append("")

@@ -82,6 +82,9 @@ inside the target container, which is also what makes the version matching real.
 
 ```bash
 firedrill run path/to/dump.dump            # restore and report
+firedrill run s3://backups/pg/daily/       # the newest object under a prefix
+firedrill run --live DATABASE_URL --keep backups/   # dump a running database now, prove it restores
+firedrill run dump.dump --image 'pgvector/pgvector:pg{major}'  # extensions the stock image lacks
 firedrill run dump.dump --json report.json # machine-readable
 firedrill run dump.dump --rto 45m          # exceeding the budget is a finding
 firedrill run dump.dump --tier fast        # schema only, for every commit
@@ -112,6 +115,30 @@ a `size:` and the artefact is checked against it **before** anything tries to
 restore it: a dump that arrives truncated but plausible never reaches a
 container, and the run reports rather than passes. Quote the digest — YAML
 reads a bare all-digit value as a number.
+
+Or skip the config: `firedrill run s3://bucket/key`, and a trailing slash
+(`s3://bucket/prefix/`) takes the newest object under it.
+
+### No backup yet? Take one and prove it in the same command
+
+```
+$ DATABASE_URL=postgresql://app@db.internal/shop firedrill run --live DATABASE_URL --keep backups/
+  [ok  ] fetch      26.59s  4,601,447 bytes from live  fresh pg_dump
+  [ok  ] target      8.48s  postgres:18
+  [ok  ] restore     5.94s  exit 0
+  [ok  ] smoke       0.55s  70 user table(s)
+```
+
+(Real output, against [pagila](https://github.com/devrimgunduz/pagila) on
+PostgreSQL 18.) `--live` asks the server its version, runs `pg_dump -Fc`
+from a container of that same major -- nothing but Docker on the host --
+and drills the result; `--keep DIR` leaves the verified dump there as
+`<db>-<UTC timestamp>.dump`. The argument is the *name* of the variable
+holding the URL, never the URL, for the same reason there is no
+`--password`; the password is registered for redaction and passed to the
+container by name. A `localhost` database is reached as the Docker host.
+`pg_dump` only reads, so this is read-only too. In `firedrill.yml`:
+`source: {type: live, url_env: DATABASE_URL, keep: backups/}`.
 
 Three properties worth stating plainly:
 
@@ -158,6 +185,17 @@ reported `ARCHIVE_TRUNCATED` (critical) before anything is restored. psql
 also exits 0 when a statement fails (a missing role, measured), so its
 stderr is classified line by line with the same rules as `pg_restore`'s,
 and the exit code firedrill reports comes from those findings.
+
+A plain dump's header is only a comment, and people edit these files.
+pagila's published `pagila-schema.sql` says "Dumped from database version
+12.11" and uses `uuidv7()`, which arrived in 18. Restored into 12 as the
+header says, 140 statements fail -- and psql, reading from a pipe, prints
+them without its usual `psql:file:line:` prefix. 0.3.0 matched only the
+prefixed form and called that restore clean; 0.4.0 reads both and runs
+psql with `-f -` so the prefix is there anyway. `--postgres 18` then
+restores all 70 tables, and the one remaining failure is real: pagila's
+`film_embedding` needs pgvector, which `--image 'pgvector/pgvector:pg{major}'`
+supplies.
 
 A plain dump can only be restored whole, so the `fast` and `sample` tiers
 refuse it (`TIER_UNSUPPORTED`) instead of quietly running a full restore.

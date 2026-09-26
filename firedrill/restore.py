@@ -190,7 +190,12 @@ def parse_stderr(stderr: str, exit_code: int) -> tuple[list[Finding], int]:
 # psql's own error format, measured on PostgreSQL 16:
 #   psql:/firedrill/dump:48: ERROR:  role "appuser" does not exist
 #   psql:<stdin>:48: ERROR:  ...        (when the dump is piped in, gzipped)
-_PSQL_LINE = re.compile(r"^psql:[^:]*(?::\d+)?:\s*(ERROR|FATAL|WARNING):\s*(.*)$", re.I)
+# psql prefixes `psql:<file>:<line>:` only when it knows a file name. Fed
+# from a pipe it prints bare `ERROR:  ...` lines -- and the first version of
+# this matched only the prefixed form, so a pipe-fed restore of pagila with
+# dozens of failed statements reported exit 0. Both forms are accepted, and
+# the restore passes `-f -` so the prefix (and line number) is there anyway.
+_PSQL_LINE = re.compile(r"^(?:psql:[^:]*(?::\d+)?:\s*)?(ERROR|FATAL|WARNING):\s*(.*)$", re.I)
 
 
 def parse_psql_stderr(stderr: str) -> list[Finding]:
@@ -228,7 +233,9 @@ def parse_psql_stderr(stderr: str) -> list[Finding]:
                 "RESTORE_ERROR", "high",
                 "A statement in the dump failed to apply. psql carried on and "
                 "exited 0, so nothing but this line records that the object it "
-                "was creating is missing.")
+                "was creating is missing. A plain dump's header can be edited "
+                "by hand; if statements fail on syntax or missing built-in "
+                "functions, it needs a newer server -- pin one with --postgres.")
         key = (rule, message[:120])
         if key in seen:
             continue
@@ -319,7 +326,7 @@ def _restore_plain(container, gzipped: bool) -> RestoreResult:
     derived from the findings, since psql's own says nothing."""
     from .docker import DUMP_PATH
 
-    psql = f"psql -U postgres -X -q -v ON_ERROR_STOP=0 -o /dev/null -d {TARGET_DB}"
+    psql = f"psql -U postgres -X -q -v ON_ERROR_STOP=0 -o /dev/null -d {TARGET_DB} -f -"
     reader = "gunzip -c" if gzipped else "cat"
     start = time.monotonic()
     # As root, like every pg_restore call: this is the step that reads the

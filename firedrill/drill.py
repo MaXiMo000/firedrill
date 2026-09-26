@@ -393,7 +393,8 @@ def _run(dump_path: str | pathlib.Path | None = None, *, flavour: str = "",
     report.dump = artifact.origin
     stage("fetch").status = OK
     stage("fetch").seconds = artifact.fetch_seconds
-    checked = ("sha256 verified" if source.sha256
+    checked = ("fresh pg_dump" if source.type == "live"
+               else "sha256 verified" if source.sha256
                else "size verified" if source.size is not None
                else "unverified")
     stage("fetch").detail = f"{artifact.size:,} bytes from {source.type}  {checked}"
