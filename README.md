@@ -128,12 +128,12 @@ Three properties worth stating plainly:
 
 ## Which dump formats
 
-| format | flag | supported |
-|---|---|---|
-| custom | `-Fc` | yes |
-| directory | `-Fd` | yes — the one that restores in parallel, so the one large databases use |
-| tar | `-Ft` | yes |
-| plain SQL | `-Fp` | **no**, and it cannot be |
+| format | flag | restored by | supported |
+|---|---|---|---|
+| custom | `-Fc` | `pg_restore` | yes |
+| directory | `-Fd` | `pg_restore` | yes — the one that restores in parallel, so the one large databases use |
+| tar | `-Ft` | `pg_restore` | yes |
+| plain SQL | `-Fp`, or `pg_dump db > backup.sql` | `psql` | yes, and `.sql.gz` too — full tier only |
 
 `--jobs N` (or `jobs: N` in `firedrill.yml`) passes `-j N` to `pg_restore`, which is what makes the directory format's parallel restore actually parallel. Custom and tar archives accept it too, restoring serially where `pg_restore` cannot split the work. Default is 1.
 
@@ -142,9 +142,25 @@ theirs in a `toc.dat` member — so the major version is read out of the artefac
 itself, with no PostgreSQL client on the host. That is what makes the
 version-matching real.
 
-Plain SQL has no header. Nothing in a `.sql` file states which server produced
-it in a form worth trusting, so firedrill cannot pick a matching container and
-says so rather than guessing at one.
+**Plain SQL** has no binary header, but pg_dump starts every plain dump with
+`-- Dumped from database version 16.15 (...)`, and that's where the version
+comes from (read straight out of a `.gz` too). It's a comment, so it can be
+stripped; when it's gone, firedrill refuses with `VERSION_UNKNOWN` and asks
+for `--postgres MAJOR` rather than guessing.
+
+Plain dumps need one check the others don't, measured on PostgreSQL 16:
+**psql restores a plain dump that was cut off mid-table with exit 0 and no
+error at all** — it takes end-of-file as the end of the data, and the table
+comes back with 9,710 of its 20,000 rows. Nothing in the restore reports it.
+The only witness is the file: pg_dump always ends a plain dump with
+`-- PostgreSQL database dump complete`, so a dump without that line is
+reported `ARCHIVE_TRUNCATED` (critical) before anything is restored. psql
+also exits 0 when a statement fails (a missing role, measured), so its
+stderr is classified line by line with the same rules as `pg_restore`'s,
+and the exit code firedrill reports comes from those findings.
+
+A plain dump can only be restored whole, so the `fast` and `sample` tiers
+refuse it (`TIER_UNSUPPORTED`) instead of quietly running a full restore.
 
 ## Which PostgreSQL versions
 

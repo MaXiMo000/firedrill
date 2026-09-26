@@ -41,9 +41,12 @@ def human(report: Report, colour: bool = False) -> str:
             f"-> recovered on postgres:{a.get('restored_into_major')}"
         )
     elif a:
+        # A plain-SQL dump has no archive version and doesn't record its
+        # database name, so neither is printed rather than shown as "None".
+        version = "" if a.get("format") == "plain" else f" v{a.get('archive_version')}"
+        source = f"  from {a.get('source_dbname')!r}" if a.get("source_dbname") else ""
         lines.append(
-            f"  archive   {a.get('format')} v{a.get('archive_version')}  "
-            f"{_size(a.get('size_bytes', 0))}  from {a.get('source_dbname')!r}"
+            f"  archive   {a.get('format')}{version}  {_size(a.get('size_bytes', 0))}{source}"
         )
         lines.append(
             f"  source    PostgreSQL {a.get('server_version')}  "

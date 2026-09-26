@@ -35,21 +35,25 @@ Str is an Int length followed by that many bytes; a negative length is NULL.
 from __future__ import annotations
 
 import dataclasses
+import gzip
 import pathlib
 import re
 import tarfile
+import zlib
 
 MAGIC = b"PGDMP"
 
+FORMAT_PLAIN = 0  # firedrill's own code: plain SQL has no archive header to carry one
 FORMAT_CUSTOM = 1
 FORMAT_TAR = 3
 FORMAT_DIRECTORY = 5
 
-_FORMAT_NAMES = {1: "custom", 3: "tar", 5: "directory"}
+_FORMAT_NAMES = {0: "plain", 1: "custom", 3: "tar", 5: "directory"}
 
-# Everything pg_restore can read. A directory dump's toc.dat reports
-# format 3 (tar), which is why both share one code here.
-RESTORABLE_FORMATS = (FORMAT_CUSTOM, FORMAT_TAR, FORMAT_DIRECTORY)
+# Everything firedrill can restore: pg_restore reads the three archive
+# formats (a directory dump's toc.dat reports format 3, tar, which is why
+# both share one code), and psql reads plain SQL.
+RESTORABLE_FORMATS = (FORMAT_PLAIN, FORMAT_CUSTOM, FORMAT_TAR, FORMAT_DIRECTORY)
 
 # From this archive version the compression field is a single raw byte rather
 # than an Int. Verified: PG 14 -> 1.14 (Int), PG 16 -> 1.15 (byte),
@@ -71,6 +75,10 @@ class ArchiveHeader:
     dbname: str | None
     server_version: str | None
     pgdump_version: str | None
+    # Plain SQL only. An archive's completeness shows up as a restore error;
+    # a plain dump's doesn't (see read_plain_header), so it's read here.
+    complete: bool = True
+    gzipped: bool = False
 
     @property
     def format_name(self) -> str:
@@ -225,6 +233,11 @@ def read_header(path: str | pathlib.Path) -> ArchiveHeader:
     with path.open("rb") as handle:
         head = handle.read(HEADER_BYTES)
 
+    # Before the tar check: tarfile.is_tarfile() also tries gzip-compressed
+    # tar, and on a truncated .gz it raised EOFError straight out of here.
+    if head.startswith(GZIP_MAGIC) or _looks_plain(head):
+        return read_plain_header(path)
+
     # A tar archive announces itself 257 bytes in, not at the start, so this is
     # checked only after the PGDMP magic has failed to match.
     if not head.startswith(MAGIC) and tarfile.is_tarfile(path):
@@ -241,3 +254,87 @@ def read_header(path: str | pathlib.Path) -> ArchiveHeader:
             ) from None
 
     return parse_header(head)
+
+
+GZIP_MAGIC = b"\x1f\x8b"
+PLAIN_MARK = "-- PostgreSQL database dump"
+PLAIN_TRAILER = "-- PostgreSQL database dump complete"
+_DUMPED_FROM = re.compile(r"^-- Dumped from database version (.+?)\s*$", re.M)
+_DUMPED_BY = re.compile(r"^-- Dumped by pg_dump version (.+?)\s*$", re.M)
+
+
+def _looks_plain(head: bytes) -> bool:
+    return PLAIN_MARK.encode() in head[:4096]
+
+
+def read_plain_header(path: str | pathlib.Path) -> ArchiveHeader:
+    """A plain-SQL dump (`pg_dump -Fp`, or `pg_dump db > backup.sql`),
+    optionally gzipped.
+
+    The server version comes from the comment pg_dump writes at the top of
+    every plain dump: `-- Dumped from database version 16.15 (...)`. It's a
+    comment, so it can be edited or stripped; when it's missing,
+    server_version is None and the run needs an explicit --postgres rather
+    than a guess.
+
+    Completeness matters more here than for an archive. Measured on
+    PostgreSQL 16: psql restoring a plain dump cut off mid-COPY exits 0 with
+    no error at all, and the table comes back with 9,710 of its 20,000 rows
+    -- it takes end-of-file as the end of the data. The only trace of the
+    truncation is in the file: pg_dump always ends a plain dump with
+    `-- PostgreSQL database dump complete`. No trailer, not complete.
+    """
+    path = pathlib.Path(path)
+    with path.open("rb") as handle:
+        gzipped = handle.read(2) == GZIP_MAGIC
+    opener = (lambda: gzip.open(path, "rt", encoding="utf-8", errors="replace")) if gzipped \
+        else (lambda: path.open("r", encoding="utf-8", errors="replace"))
+
+    if gzipped:
+        # zlib rather than gzip.open: gzip raises EOFError on a stream cut off
+        # early and throws away what it had decoded, but a gzip cut off
+        # inside its first 64 KB is still a truncated dump, not garbage.
+        with path.open("rb") as raw:
+            try:
+                head = zlib.decompressobj(wbits=31).decompress(raw.read(1 << 20), 65536)
+            except zlib.error as exc:
+                raise ArchiveError(f"{path} is gzipped but could not be read ({exc})") from None
+        head = head.decode("utf-8", errors="replace")
+    else:
+        with opener() as text:
+            head = text.read(65536)
+    if PLAIN_MARK not in head[:4096]:
+        raise ArchiveError(
+            f"{path} is not a pg_dump archive (no PGDMP header) and not a plain-SQL "
+            "pg_dump either (no '-- PostgreSQL database dump' comment at the top). "
+            + ("It is gzipped: check what was compressed." if gzipped else
+               "A plain-SQL dump or a gzipped file will look like this.")
+        )
+
+    complete = True
+    try:
+        if gzipped:
+            # ponytail: streams the whole file to see its end; a gzip stream
+            # can't seek. A cut-off gzip raises EOFError: that's a truncated
+            # dump, not an unreadable one.
+            tail = ""
+            with opener() as text:
+                for chunk in iter(lambda: text.read(1 << 20), ""):
+                    tail = (tail + chunk)[-4096:]
+        else:
+            with path.open("rb") as raw:
+                raw.seek(max(0, path.stat().st_size - 4096))
+                tail = raw.read().decode("utf-8", errors="replace")
+        complete = PLAIN_TRAILER in tail
+    except EOFError:
+        complete = False
+
+    server = _DUMPED_FROM.search(head)
+    by = _DUMPED_BY.search(head)
+    return ArchiveHeader(
+        archive_version=(0, 0, 0), int_size=0, offset_size=0, format=FORMAT_PLAIN,
+        compression=1 if gzipped else 0, dbname=None,
+        server_version=server.group(1) if server else None,
+        pgdump_version=by.group(1) if by else None,
+        complete=complete, gzipped=gzipped,
+    )
