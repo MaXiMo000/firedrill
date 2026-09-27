@@ -14,7 +14,7 @@ import shutil
 import tempfile
 import time
 
-from . import archive, docker, history as history_module, ladder, physical, pitr, \
+from . import archive, docker, history as history_module, ladder, mysql, physical, pitr, \
     restore as restore_stage, sources
 from . import config as _config_module
 from .config import DEFAULT as DEFAULT_CONFIG
@@ -468,6 +468,131 @@ def run_physical(tool: str, *, repo=None, stanza=None, backup=None, target=None,
     return _suppress(report, cfg)
 
 
+def _run_mysql(report: Report, found: dict, dump_path, *, cfg, flavour: str,
+               pin_major, ready_timeout: int, began: float) -> Report:
+    """A mysqldump / mariadb-dump: version from its header, restored into that
+    same engine and version, then smoke, semantics and CHECK TABLE."""
+    def stage(name):
+        return next(s for s in report.stages if s.name == name)
+
+    engine, version = found["engine"], pin_major or found["version"]
+    label = "MariaDB" if engine == "mariadb" else "MySQL"
+    report.archive.update({"format": f"{engine} dump", "server_version": found["version"],
+                           "engine": engine, "gzipped": found["gzipped"]})
+    for name in ("structure", "volume"):
+        stage(name).status = NOT_CONFIGURED
+        stage(name).detail = "PostgreSQL only"
+
+    stage("inspect").status = OK
+    stage("inspect").detail = f"{label} {found['version'] or '?'}"
+    if not version:
+        stage("inspect").status = FAILED
+        report.findings.append(Finding(
+            stage="inspect", rule="VERSION_UNKNOWN", severity="critical",
+            message=f"the {label} dump names no server version",
+            fix="Pass --postgres with the server version (e.g. 8.4) -- the flag "
+                "pins whichever engine the dump is from. firedrill will not guess.",
+            evidence=""))
+        report.total_seconds = time.monotonic() - began
+        return report
+    if not found["complete"]:
+        # The trailer is written only when the dump finished. The mysql client
+        # restores a dump cut at a statement boundary with exit 0.
+        stage("inspect").status = FAILED
+        report.findings.append(Finding(
+            stage="inspect", rule="ARCHIVE_TRUNCATED", severity="critical",
+            message=f"the dump has no `-- Dump completed` trailer: {label}'s dump "
+                    "tool did not finish writing it",
+            fix="The backup job ran out of disk, was killed, or its output was "
+                "cut off. Check the writer's exit status; the file is incomplete.",
+            evidence=""))
+
+    usable, why = docker.docker_available()
+    if not usable:
+        stage("target").status = NOT_RUN
+        report.findings.append(Finding(
+            stage="target", rule="TARGET_UNAVAILABLE", severity="critical",
+            message=f"the restore could NOT be verified: {why}",
+            fix="Start Docker and run again.", evidence=""))
+        report.total_seconds = time.monotonic() - began
+        return report
+
+    container = mysql.MySQLContainer(engine, version, dump_path, flavour=flavour,
+                                     ready_timeout=ready_timeout)
+    started = time.monotonic()
+    try:
+        try:
+            container.start()
+            container.wait_ready()
+        except docker.TargetError as exc:
+            stage("target").status = FAILED
+            stage("target").seconds = time.monotonic() - started
+            report.findings.append(Finding(
+                stage="target", rule="TARGET_UNAVAILABLE", severity="critical",
+                message=f"the restore could NOT be verified: {str(exc).splitlines()[0]}",
+                fix="The target never came up, so nothing about this dump was proved.",
+                evidence=""))
+            report.total_seconds = time.monotonic() - began
+            return report
+        stage("target").status = OK
+        stage("target").seconds = time.monotonic() - started
+        stage("target").detail = container.image
+        report.archive["restored_into_major"] = version
+
+        started = time.monotonic()
+        code, found_errors, _ = mysql.restore(container, found["gzipped"])
+        report.verified = True
+        report.findings.extend(found_errors)
+        stage("restore").seconds = time.monotonic() - started
+        stage("restore").status = FAILED if found_errors else OK
+        stage("restore").detail = f"exit {code}"
+
+        started = time.monotonic()
+        restored = mysql.schemas(container)
+        stage("smoke").seconds = time.monotonic() - started
+        stage("smoke").detail = ", ".join(f"{n}: {c} table(s)" for n, c in restored.items()) or "nothing"
+        if not restored:
+            stage("smoke").status = FAILED
+            report.findings.append(Finding(
+                stage="smoke", rule="SMOKE_EMPTY", severity="high",
+                message="the restore left no user tables in any database",
+                fix="The dump restored nothing you would miss.", evidence=""))
+        else:
+            stage("smoke").status = OK
+
+        if cfg.semantics:
+            db = next(iter(restored), None) if len(restored) == 1 else None
+            if db is None:
+                stage("semantics").status = NOT_RUN
+                report.findings.append(Finding(
+                    stage="semantics", rule="DATABASE_AMBIGUOUS", severity="high",
+                    message="semantics checks need one database; the dump restored "
+                            f"{', '.join(restored) or 'none'}",
+                    fix="Qualify table names in the checks (db.table).", evidence=""))
+            else:
+                started = time.monotonic()
+                sem, _ = ladder.semantics(container, cfg, db)
+                report.findings.extend(sem)
+                stage("semantics").seconds = time.monotonic() - started
+                stage("semantics").status = FAILED if sem else OK
+                stage("semantics").detail = f"{len(cfg.semantics)} check(s) in {db}"
+        else:
+            stage("semantics").status = NOT_CONFIGURED
+            stage("semantics").detail = "no semantics checks in the config"
+
+        started = time.monotonic()
+        checked = mysql.check_tables(container, list(restored))
+        report.findings.extend(checked)
+        stage("integrity").seconds = time.monotonic() - started
+        stage("integrity").status = FAILED if checked else OK
+        stage("integrity").detail = f"CHECK TABLE on {sum(restored.values())} table(s)"
+    finally:
+        container.teardown()
+
+    report.total_seconds = time.monotonic() - began
+    return report
+
+
 def _sequence_detail(info: dict) -> str:
     """`9 of 13 sequence(s)` when some could not be linked to a column.
 
@@ -614,6 +739,12 @@ def _run(dump_path: str | pathlib.Path | None = None, *, flavour: str = "",
                 "bytes you meant to restore.",
             evidence=f"{artifact.origin}",
         ))
+
+    # A MySQL or MariaDB dump takes its own path from here.
+    found = mysql.detect(dump_path)
+    if found is not None:
+        return _run_mysql(report, found, dump_path, cfg=cfg, flavour=flavour,
+                          pin_major=pin_major, ready_timeout=ready_timeout, began=began)
 
     # -- inspect -----------------------------------------------------------
     started = time.monotonic()

@@ -41,6 +41,12 @@ def human(report: Report, colour: bool = False) -> str:
                    else "WAL replayed to the end of the archive")
         lines.append(f"  source    PostgreSQL {a.get('server_major')}  -> {towards} "
                      f"on postgres:{a.get('restored_into_major')}")
+    elif a.get("engine"):
+        name = "MariaDB" if a["engine"] == "mariadb" else "MySQL"
+        packed = ", gzipped" if a.get("gzipped") else ""
+        lines.append(f"  archive   {name} dump{packed}")
+        lines.append(f"  source    {name} {a.get('server_version')}  -> restored into "
+                     f"{a['engine']}:{a.get('restored_into_major')}")
     elif a.get("recovery_target_time"):
         # A PITR run has no archive to describe. Printing the dump fields here
         # rendered "archive None vNone 0B from None", which is worse than
