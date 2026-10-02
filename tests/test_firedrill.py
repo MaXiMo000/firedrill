@@ -368,6 +368,71 @@ def test_physical_restores_real_pgbackrest_and_walg_repositories():
         check(f"{tool}: and that is a FAIL, not could-not-verify", early.verified, True)
 
 
+# ------------------------------------------------------------------- mysql --
+
+MYSQL_DUMP = """-- MySQL dump 10.13  Distrib 8.4.11, for Linux (x86_64)
+--
+-- Host: localhost    Database: shop
+-- ------------------------------------------------------
+-- Server version\t8.4.11
+
+CREATE DATABASE /*!32312 IF NOT EXISTS*/ `shop`;
+USE `shop`;
+CREATE TABLE `orders` (`id` int NOT NULL AUTO_INCREMENT, `amount` int, PRIMARY KEY (`id`)) ENGINE=InnoDB;
+INSERT INTO `orders` VALUES (1,10),(2,20),(3,30);
+CREATE TABLE `customers` (`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB;
+INSERT INTO `customers` VALUES (1),(2);
+
+-- Dump completed on 2026-09-26 21:12:51
+"""
+
+
+def test_mysql_and_mariadb_dumps_are_recognised():
+    import gzip
+    import tempfile
+    from firedrill import mysql
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = pathlib.Path(tmp)
+        (tmp / "m.sql").write_text(MYSQL_DUMP)
+        check("mysql", mysql.detect(tmp / "m.sql"),
+              {"engine": "mysql", "version": "8.4", "gzipped": False, "complete": True})
+        # MariaDB 11.x opens with a sandbox-mode line before its header.
+        maria = ("/*M!999999\\- enable the sandbox mode */ \n-- MariaDB dump 10.19-11.4.13-MariaDB, "
+                 "for debian-linux-gnu (x86_64)\n--\n-- Server version\t11.4.13-MariaDB-ubu2404\n"
+                 "-- Dump completed on 2026-09-26 21:33:06\n")
+        (tmp / "mdb.sql").write_text(maria)
+        check("mariadb behind the sandbox line", (mysql.detect(tmp / "mdb.sql") or {}).get("engine"), "mariadb")
+        check("its version", mysql.detect(tmp / "mdb.sql")["version"], "11.4")
+        (tmp / "m.sql.gz").write_bytes(gzip.compress(MYSQL_DUMP.encode()))
+        check("gzipped", mysql.detect(tmp / "m.sql.gz")["gzipped"], True)
+        (tmp / "cut.sql").write_text(MYSQL_DUMP[:len(MYSQL_DUMP) // 2])
+        check("no trailer is incomplete", mysql.detect(tmp / "cut.sql")["complete"], False)
+        (tmp / "pg.sql").write_text("--\n-- PostgreSQL database dump\n--\n")
+        check("a Postgres dump is not MySQL", mysql.detect(tmp / "pg.sql"), None)
+
+
+def test_integration_mysql_dump_restores_and_truncation_is_caught():
+    """Against a real mysql:8.4. The truncated copy ends on a statement
+    boundary, which the mysql client restores with exit 0 -- only the
+    missing trailer says it is incomplete."""
+    import tempfile
+    needs_docker()
+    with tempfile.TemporaryDirectory() as tmp:
+        good = pathlib.Path(tmp) / "shop.sql"
+        good.write_text(MYSQL_DUMP)
+        cfg = config.loads("version: 1\nsemantics:\n  - name: orders\n"
+                           "    sql: select count(*) from orders\n    expect: \"== 3\"\n")
+        report = drill.run(good, cfg=cfg)
+        check("mysql dump passes", (report.ok, [f.rule for f in report.findings]), (True, []))
+        check("both tables back", "shop: 2 table(s)" in next(
+            s for s in report.stages if s.name == "smoke").detail, True)
+        cut = pathlib.Path(tmp) / "cut.sql"
+        cut.write_text(MYSQL_DUMP.split("CREATE TABLE `customers`")[0])
+        report = drill.run(cut)
+        check("truncation caught", [f.rule for f in report.findings], ["ARCHIVE_TRUNCATED"])
+        check("and it is a FAIL", (report.verified, report.ok), (True, False))
+
+
 def test_notify_posts_the_verdict_to_a_real_webhook():
     """A real HTTP receiver on localhost. Failing and could-not-verify runs
     notify; a pass does not unless asked; the URL never reaches an error."""
@@ -2788,7 +2853,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 155
+    FLOOR = 157
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "

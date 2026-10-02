@@ -201,6 +201,38 @@ supplies.
 A plain dump can only be restored whole, so the `fast` and `sample` tiers
 refuse it (`TIER_UNSUPPORTED`) instead of quietly running a full restore.
 
+## MySQL and MariaDB
+
+`firedrill run backup.sql` recognises a `mysqldump` or `mariadb-dump` file
+(plain or `.gz`) by its own header and takes the same path Postgres does:
+the server version comes from the dump, the restore runs in `mysql:<version>`
+or `mariadb:<version>`, and then it runs smoke, your `semantics:` checks, and
+`CHECK TABLE` on every restored table.
+
+- **Truncation.** Both tools end a finished dump with `-- Dump completed on
+  ...`. The `mysql` client restores a dump cut at a statement boundary with
+  exit 0, so a missing trailer is `ARCHIVE_TRUNCATED` (critical) before
+  anything is restored.
+- **Errors.** The client stops at the first failing statement; its
+  `ERROR nnnn (state) at line N` becomes a finding naming the line, since
+  everything after it was never restored.
+- **MariaDB 10.5.25+/11.x** dumps open with a `/*M!999999\- enable the
+  sandbox mode */` line before the header -- the reason they won't load into
+  MySQL. firedrill reads past it and restores them into MariaDB.
+- The password reaches the client through `MYSQL_PWD` inside the container,
+  never argv.
+
+Tested on [datacharmer/test_db](https://github.com/datacharmer/test_db)'s
+employees database (300,024 employees, 2,844,047 salary rows), dumped by
+each engine's own tool:
+
+| dump | result |
+|---|---|
+| MySQL 8.4, 168 MB | PASS: 8 tables, both exact counts, `CHECK TABLE` clean (restore 63 s) |
+| MariaDB 11.4, 172 MB, with the sandbox-mode line | PASS (restore 25 s) |
+| the MySQL dump gzipped, 36 MB | PASS |
+| the MySQL dump cut off at 80 MB | FAIL: `ARCHIVE_TRUNCATED`, the client's `ERROR 1064 at line 265`, 7 of 8 tables, both counts wrong |
+
 ## Which PostgreSQL versions
 
 Tested end to end against **13, 14, 15, 16, 17 and 18** — dump on any of them,
