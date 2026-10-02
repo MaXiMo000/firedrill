@@ -14,7 +14,7 @@ import shutil
 import tempfile
 import time
 
-from . import archive, docker, history as history_module, ladder, pitr, \
+from . import archive, docker, history as history_module, ladder, mysql, physical, pitr, \
     restore as restore_stage, sources
 from . import config as _config_module
 from .config import DEFAULT as DEFAULT_CONFIG
@@ -26,6 +26,9 @@ STAGES = ("fetch", "inspect", "target", "restore", "smoke",
 # PITR has its own shape: there is no archive to inspect and no pg_restore
 # to run, and the rung that matters is the boundary assertion.
 PITR_STAGES = ("recover", "boundary", "integrity")
+
+# pgBackRest / WAL-G: the tool restores, WAL replays, then the usual rungs.
+PHYSICAL_STAGES = ("recover", "smoke", "semantics", "integrity")
 
 OK = "ok"
 FAILED = "failed"
@@ -276,6 +279,320 @@ def run_pitr(base, wal, target: str, *, cfg=None, flavour: str = "",
     return _suppress(report, cfg)
 
 
+def run_physical(tool: str, *, repo=None, stanza=None, backup=None, target=None,
+                 database=None, cfg=None, flavour: str = "", pin_major=None,
+                 max_age: float | None = None, fail_on: str = DEFAULT_FAIL_ON,
+                 ready_timeout: int = docker.DEFAULT_READY_TIMEOUT) -> Report:
+    """Restore a pgBackRest or WAL-G backup with the tool itself, replay WAL
+    (to `target`, if given), and put the recovered server through the ladder."""
+    cfg = cfg if cfg is not None else DEFAULT_CONFIG
+    stages = [Stage(name) for name in PHYSICAL_STAGES]
+    report = Report(dump=f"{tool} {repo or '(remote repository)'}", stages=stages,
+                    findings=[], archive={"tool": tool}, fail_on=fail_on, tier="full")
+    began = time.monotonic()
+
+    def stage(name):
+        return next(s for s in stages if s.name == name)
+
+    def stop(rule, message, fix, evidence="", status=FAILED):
+        # A restore that ran and broke has *tested* the backup: FAIL. Only a
+        # check that could not happen at all (NOT_RUN) is COULD NOT VERIFY.
+        report.verified = status == FAILED
+        stage("recover").status = status
+        stage("recover").detail = rule
+        report.findings.append(Finding(stage="recover", rule=rule, severity="critical",
+                                       message=message, fix=fix, evidence=evidence))
+        report.total_seconds = time.monotonic() - began
+        return _suppress(report, cfg)
+
+    if target is not None:
+        try:
+            target = pitr.check_target(target)
+        except pitr.InvalidTarget as exc:
+            return stop("PITR_TARGET_INVALID", str(exc), "Nothing was started.", status=NOT_RUN)
+    try:
+        meta = physical.describe(tool, pathlib.Path(repo) if repo else None,
+                                 stanza, backup, pin_major, target)
+        # WAL-G fetches exactly the base backup chosen here -- for a PITR run,
+        # the newest one that finished before the target.
+        script = physical.script_for(
+            tool, repo=repo is not None, stanza=meta.get("stanza"),
+            backup=meta["label"] if tool == "walg" and repo else backup, target=target)
+    except physical.TargetBeforeBackup as exc:
+        return stop("PITR_TARGET_BEFORE_BACKUP", f"{exc}, so {target} cannot be recovered",
+                    "Postgres cannot stop recovery before a backup's end: asked to, it "
+                    "refuses -- or, when nothing committed during the backup, silently "
+                    "recovers to a LATER moment. Retention has removed the backup this "
+                    "moment needs, or none was ever taken before it.")
+    except physical.PhysicalError as exc:
+        return stop("BACKUP_UNREADABLE", f"the backup could NOT be verified: {exc}",
+                    "Nothing was restored.", status=NOT_RUN)
+    report.archive.update({k: (v.isoformat() if hasattr(v, "isoformat") else v)
+                           for k, v in meta.items()})
+    report.archive["server_major"] = meta["major"]
+    if target:
+        report.archive["recovery_target_time"] = target
+    report.findings.extend(physical.age_finding(meta.get("finished"), max_age))
+    if meta.get("failed"):
+        report.findings.append(Finding(
+            stage="recover", rule="BACKUP_FAILED", severity="high",
+            message=f"the repository marks backup {meta['label']} as having errors",
+            fix="pgBackRest recorded a problem while taking it. Read its log for that run.",
+            evidence=""))
+
+    usable, why = docker.docker_available()
+    if not usable:
+        return stop("TARGET_UNAVAILABLE", f"the restore could NOT be verified: {why}",
+                    "Start Docker and run again.", status=NOT_RUN)
+
+    started = time.monotonic()
+    try:
+        image = physical.tool_image(tool, docker.image_for(meta["major"], flavour))
+    except docker.TargetError as exc:
+        return stop("TARGET_UNAVAILABLE", f"the restore could NOT be verified: {exc}",
+                    "The restore image could not be prepared; nothing was restored.",
+                    status=NOT_RUN)
+    container = physical.PhysicalContainer(meta["major"], image, script,
+                                           pathlib.Path(repo) if repo else None,
+                                           ready_timeout=ready_timeout)
+    try:
+        try:
+            container.start()
+            container.wait_ready()
+        except docker.TargetError as exc:
+            logs = container.logs(tail=200)
+            stage("recover").seconds = time.monotonic() - started
+            if "[075]" in logs or "before consistent recovery point" in logs:
+                return stop("PITR_TARGET_BEFORE_BACKUP",
+                            f"no backup finished before {target}, so that moment cannot be "
+                            "recovered from this repository",
+                            "Retention has already removed the backup you would need for "
+                            "this moment -- or the target is older than any backup ever taken.",
+                            physical.tool_error(logs))
+            if pitr._TARGET_UNREACHED in logs:
+                return stop("PITR_TARGET_UNREACHED",
+                            f"recovery could not reach {target}: the WAL archive ends before it",
+                            "The base backup and the archived WAL cannot reconstruct that "
+                            "moment -- the failure you would meet during the incident.",
+                            pitr._recovery_trace(logs))
+            return stop("RESTORE_FAILED", f"the {tool} restore failed: {physical.tool_error(logs)}",
+                        "This backup cannot be restored as it stands -- a corrupt or "
+                        "incomplete file, or WAL missing from the archive.",
+                        pitr._last_error(logs))
+
+        promoted = pitr.confirm_promoted(container)
+        stage("recover").seconds = time.monotonic() - started
+        if promoted and pitr._TARGET_UNREACHED in container.logs(tail=200):
+            # Postgres serves read-only queries during recovery, so the server
+            # can look ready and then exit because the archive ran out.
+            return stop("PITR_TARGET_UNREACHED",
+                        f"recovery could not reach {target}: the WAL archive ends before it",
+                        "The base backup and the archived WAL cannot reconstruct that "
+                        "moment -- the failure you would meet during the incident.",
+                        pitr._recovery_trace(container.logs(tail=200)))
+        if promoted:
+            report.findings.extend(promoted)
+            stage("recover").status = FAILED
+            report.total_seconds = time.monotonic() - began
+            return _suppress(report, cfg)
+        # Asked, not assumed: `-c archive_mode=off` should outrank every file,
+        # but a drill that archived into production's repository would be the
+        # worst thing this tool could do, so the server confirms it.
+        archiving = container.sql("show archive_mode").stdout.strip()
+        if archiving != "off":
+            container.teardown()
+            return stop("ARCHIVING_ENABLED",
+                        f"the restored server reports archive_mode={archiving or '?'}",
+                        "Stopped immediately: it could push WAL into the repository "
+                        "being checked.")
+        report.verified = True
+        stage("recover").status = OK
+        stage("recover").detail = (f"{meta['label']} -> {target}" if target
+                                   else f"{meta['label']}, WAL replayed to the end")
+        report.archive["restored_into_major"] = _served_major(container)
+
+        started = time.monotonic()
+        names = physical.databases(container)
+        counts = {n: physical.user_tables(container, n) for n in names}
+        stage("smoke").seconds = time.monotonic() - started
+        if all(c in (None, 0) for c in counts.values()):
+            stage("smoke").status = FAILED
+            report.findings.append(Finding(
+                stage="smoke", rule="SMOKE_EMPTY", severity="high",
+                message="the recovered server holds no user tables in any database",
+                fix="The restore produced a server, not your data.", evidence=str(counts)))
+        else:
+            stage("smoke").status = OK
+        stage("smoke").detail = ", ".join(f"{n}: {c} table(s)" for n, c in counts.items())
+
+        db = database or (names[0] if len(names) == 1 else None)
+        if cfg.semantics:
+            if db is None:
+                stage("semantics").status = NOT_RUN
+                report.findings.append(Finding(
+                    stage="semantics", rule="DATABASE_AMBIGUOUS", severity="high",
+                    message=f"semantics checks need one database; the backup has {', '.join(names)}",
+                    fix="Pass --database NAME.", evidence=""))
+            else:
+                started = time.monotonic()
+                sem, _ = ladder.semantics(container, cfg, db)
+                report.findings.extend(sem)
+                stage("semantics").seconds = time.monotonic() - started
+                stage("semantics").status = FAILED if sem else OK
+                stage("semantics").detail = f"{len(cfg.semantics)} check(s) in {db}"
+        else:
+            stage("semantics").status = NOT_CONFIGURED
+            stage("semantics").detail = "no semantics checks in the config"
+            if target:
+                report.findings.append(Finding(
+                    stage="semantics", rule="PITR_UNASSERTED", severity="high",
+                    message="recovery reached the target, and nothing checked what the "
+                            "database then contained",
+                    fix="Add two semantics checks: one row written before the target "
+                        "that must exist, one written after that must not.",
+                    evidence=""))
+
+        started = time.monotonic()
+        checked = 0
+        for name in ([db] if db else names):
+            integ, info = ladder.integrity(container, cfg, name)
+            report.findings.extend(integ)
+            checked += info.get("sequences", 0)
+        stage("integrity").seconds = time.monotonic() - started
+        stage("integrity").status = FAILED if any(f.stage == "integrity" for f in report.findings) else OK
+        stage("integrity").detail = f"{checked} sequence(s)"
+    finally:
+        container.teardown()
+
+    report.total_seconds = time.monotonic() - began
+    return _suppress(report, cfg)
+
+
+def _run_mysql(report: Report, found: dict, dump_path, *, cfg, flavour: str,
+               pin_major, ready_timeout: int, began: float) -> Report:
+    """A mysqldump / mariadb-dump: version from its header, restored into that
+    same engine and version, then smoke, semantics and CHECK TABLE."""
+    def stage(name):
+        return next(s for s in report.stages if s.name == name)
+
+    engine, version = found["engine"], pin_major or found["version"]
+    label = "MariaDB" if engine == "mariadb" else "MySQL"
+    report.archive.update({"format": f"{engine} dump", "server_version": found["version"],
+                           "engine": engine, "gzipped": found["gzipped"]})
+    for name in ("structure", "volume"):
+        stage(name).status = NOT_CONFIGURED
+        stage(name).detail = "PostgreSQL only"
+
+    stage("inspect").status = OK
+    stage("inspect").detail = f"{label} {found['version'] or '?'}"
+    if not version:
+        stage("inspect").status = FAILED
+        report.findings.append(Finding(
+            stage="inspect", rule="VERSION_UNKNOWN", severity="critical",
+            message=f"the {label} dump names no server version",
+            fix="Pass --postgres with the server version (e.g. 8.4) -- the flag "
+                "pins whichever engine the dump is from. firedrill will not guess.",
+            evidence=""))
+        report.total_seconds = time.monotonic() - began
+        return report
+    if not found["complete"]:
+        # The trailer is written only when the dump finished. The mysql client
+        # restores a dump cut at a statement boundary with exit 0.
+        stage("inspect").status = FAILED
+        report.findings.append(Finding(
+            stage="inspect", rule="ARCHIVE_TRUNCATED", severity="critical",
+            message=f"the dump has no `-- Dump completed` trailer: {label}'s dump "
+                    "tool did not finish writing it",
+            fix="The backup job ran out of disk, was killed, or its output was "
+                "cut off. Check the writer's exit status; the file is incomplete.",
+            evidence=""))
+
+    usable, why = docker.docker_available()
+    if not usable:
+        stage("target").status = NOT_RUN
+        report.findings.append(Finding(
+            stage="target", rule="TARGET_UNAVAILABLE", severity="critical",
+            message=f"the restore could NOT be verified: {why}",
+            fix="Start Docker and run again.", evidence=""))
+        report.total_seconds = time.monotonic() - began
+        return report
+
+    container = mysql.MySQLContainer(engine, version, dump_path, flavour=flavour,
+                                     ready_timeout=ready_timeout)
+    started = time.monotonic()
+    try:
+        try:
+            container.start()
+            container.wait_ready()
+        except docker.TargetError as exc:
+            stage("target").status = FAILED
+            stage("target").seconds = time.monotonic() - started
+            report.findings.append(Finding(
+                stage="target", rule="TARGET_UNAVAILABLE", severity="critical",
+                message=f"the restore could NOT be verified: {str(exc).splitlines()[0]}",
+                fix="The target never came up, so nothing about this dump was proved.",
+                evidence=""))
+            report.total_seconds = time.monotonic() - began
+            return report
+        stage("target").status = OK
+        stage("target").seconds = time.monotonic() - started
+        stage("target").detail = container.image
+        report.archive["restored_into_major"] = version
+
+        started = time.monotonic()
+        code, found_errors, _ = mysql.restore(container, found["gzipped"])
+        report.verified = True
+        report.findings.extend(found_errors)
+        stage("restore").seconds = time.monotonic() - started
+        stage("restore").status = FAILED if found_errors else OK
+        stage("restore").detail = f"exit {code}"
+
+        started = time.monotonic()
+        restored = mysql.schemas(container)
+        stage("smoke").seconds = time.monotonic() - started
+        stage("smoke").detail = ", ".join(f"{n}: {c} table(s)" for n, c in restored.items()) or "nothing"
+        if not restored:
+            stage("smoke").status = FAILED
+            report.findings.append(Finding(
+                stage="smoke", rule="SMOKE_EMPTY", severity="high",
+                message="the restore left no user tables in any database",
+                fix="The dump restored nothing you would miss.", evidence=""))
+        else:
+            stage("smoke").status = OK
+
+        if cfg.semantics:
+            db = next(iter(restored), None) if len(restored) == 1 else None
+            if db is None:
+                stage("semantics").status = NOT_RUN
+                report.findings.append(Finding(
+                    stage="semantics", rule="DATABASE_AMBIGUOUS", severity="high",
+                    message="semantics checks need one database; the dump restored "
+                            f"{', '.join(restored) or 'none'}",
+                    fix="Qualify table names in the checks (db.table).", evidence=""))
+            else:
+                started = time.monotonic()
+                sem, _ = ladder.semantics(container, cfg, db)
+                report.findings.extend(sem)
+                stage("semantics").seconds = time.monotonic() - started
+                stage("semantics").status = FAILED if sem else OK
+                stage("semantics").detail = f"{len(cfg.semantics)} check(s) in {db}"
+        else:
+            stage("semantics").status = NOT_CONFIGURED
+            stage("semantics").detail = "no semantics checks in the config"
+
+        started = time.monotonic()
+        checked = mysql.check_tables(container, list(restored))
+        report.findings.extend(checked)
+        stage("integrity").seconds = time.monotonic() - started
+        stage("integrity").status = FAILED if checked else OK
+        stage("integrity").detail = f"CHECK TABLE on {sum(restored.values())} table(s)"
+    finally:
+        container.teardown()
+
+    report.total_seconds = time.monotonic() - began
+    return report
+
+
 def _sequence_detail(info: dict) -> str:
     """`9 of 13 sequence(s)` when some could not be linked to a column.
 
@@ -422,6 +739,12 @@ def _run(dump_path: str | pathlib.Path | None = None, *, flavour: str = "",
                 "bytes you meant to restore.",
             evidence=f"{artifact.origin}",
         ))
+
+    # A MySQL or MariaDB dump takes its own path from here.
+    found = mysql.detect(dump_path)
+    if found is not None:
+        return _run_mysql(report, found, dump_path, cfg=cfg, flavour=flavour,
+                          pin_major=pin_major, ready_timeout=ready_timeout, began=began)
 
     # -- inspect -----------------------------------------------------------
     started = time.monotonic()

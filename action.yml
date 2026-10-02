@@ -35,6 +35,40 @@ inputs:
       for databases using extensions the stock postgres image lacks.
     required: false
     default: ""
+  physical:
+    description: >-
+      pgbackrest or walg: restore a physical backup with that tool instead of a
+      dump. Configure a remote repository with PGBACKREST_* / WALG_* / AWS_*
+      variables in the step's `env:`, or give a local one in `repo`.
+    required: false
+    default: ""
+  repo:
+    description: With `physical`, a local repository directory.
+    required: false
+    default: ""
+  stanza:
+    description: "With `physical: pgbackrest`, the stanza."
+    required: false
+    default: ""
+  target:
+    description: With `physical`, recover to this timestamp instead of the end of the archive.
+    required: false
+    default: ""
+  max-age:
+    description: With `physical`, fail when the newest backup is older than this, e.g. 26h.
+    required: false
+    default: ""
+  postgres:
+    description: With `physical` and a remote repository, the Postgres major version.
+    required: false
+    default: ""
+  notify:
+    description: >-
+      Name of an environment variable holding a Slack/Discord/any webhook URL
+      (set it from a secret with `env:`). Posts the verdict when the drill fails
+      or could not run.
+    required: false
+    default: ""
   config:
     description: Path to firedrill.yml. Defaults to one beside the checkout.
     required: false
@@ -118,9 +152,25 @@ runs:
       # becomes an unactionable one.
       run: |
         set -uo pipefail
+        if [ -n "${{ inputs.physical }}" ]; then
+          args=(physical "${{ inputs.physical }}")
+          [ -n "${{ inputs.repo }}" ]     && args+=(--repo "${{ inputs.repo }}")
+          [ -n "${{ inputs.stanza }}" ]   && args+=(--stanza "${{ inputs.stanza }}")
+          [ -n "${{ inputs.target }}" ]   && args+=(--target "${{ inputs.target }}")
+          [ -n "${{ inputs.max-age }}" ]  && args+=(--max-age "${{ inputs.max-age }}")
+          [ -n "${{ inputs.postgres }}" ] && args+=(--postgres "${{ inputs.postgres }}")
+          [ -n "${{ inputs.notify }}" ]   && args+=(--notify "${{ inputs.notify }}")
+          [ -n "${{ inputs.image }}" ]    && args+=(--image "${{ inputs.image }}")
+          [ -n "${{ inputs.config }}" ]   && args+=(--config "${{ inputs.config }}")
+          [ -n "${{ inputs.junit }}" ]    && args+=(--junit "${{ inputs.junit }}")
+          [ -n "${{ inputs.json }}" ]     && args+=(--json "${{ inputs.json }}")
+          args+=(--fail-on "${{ inputs.fail-on }}")
+          firedrill "${args[@]}" | tee firedrill-output.txt || true
+        else
         args=(run)
         [ -n "${{ inputs.dump }}" ]     && args+=("${{ inputs.dump }}")
         [ -n "${{ inputs.live }}" ]     && args+=(--live "${{ inputs.live }}")
+        [ -n "${{ inputs.notify }}" ]   && args+=(--notify "${{ inputs.notify }}")
         [ -n "${{ inputs.keep }}" ]     && args+=(--keep "${{ inputs.keep }}")
         [ -n "${{ inputs.image }}" ]    && args+=(--image "${{ inputs.image }}")
         [ -n "${{ inputs.config }}" ]   && args+=(--config "${{ inputs.config }}")
@@ -132,6 +182,7 @@ runs:
         args+=(--fail-on "${{ inputs.fail-on }}")
 
         firedrill "${args[@]}" | tee firedrill-output.txt || true
+        fi
 
         report="${{ inputs.json }}"
         if [ -n "$report" ] && [ -f "$report" ]; then

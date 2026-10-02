@@ -102,6 +102,43 @@ def build_parser() -> argparse.ArgumentParser:
     drill_pitr.add_argument("--junit", metavar="PATH")
     drill_pitr.add_argument("--quiet", action="store_true")
 
+    phys = sub.add_parser(
+        "physical", help="restore a pgBackRest or WAL-G backup with the tool itself, and report")
+    phys.add_argument("tool", choices=("pgbackrest", "walg"))
+    phys.add_argument("--repo", metavar="DIR",
+                      help="a local repository (mounted read-only). Omit it for a remote "
+                           "one configured through PGBACKREST_* / WALG_* / AWS_* variables")
+    phys.add_argument("--stanza", help="pgBackRest stanza (found automatically if there is one)")
+    phys.add_argument("--backup", metavar="NAME",
+                      help="a specific backup set or base backup (default: the newest)")
+    phys.add_argument("--target", metavar="TIMESTAMP",
+                      help="recover to this moment instead of replaying all archived WAL")
+    phys.add_argument("--database", metavar="NAME",
+                      help="where semantics checks run (default: the only database there is)")
+    phys.add_argument("--postgres", metavar="MAJOR",
+                      help="the major version; needed for a remote repository")
+    phys.add_argument("--max-age", metavar="DURATION",
+                      help="the newest backup must be younger than this, e.g. 26h")
+    phys.add_argument("--image", metavar="TEMPLATE",
+                      help="base image with a {major} slot, e.g. 'pgvector/pgvector:pg{major}'")
+    phys.add_argument("--config", metavar="PATH")
+    phys.add_argument("--no-config", action="store_true")
+    phys.add_argument("--fail-on", choices=SEVERITIES, default="high")
+    phys.add_argument("--ready-timeout", type=int, default=600,
+                      help="seconds to wait for restore and WAL replay (default: %(default)s)")
+    phys.add_argument("--json", metavar="PATH")
+    phys.add_argument("--junit", metavar="PATH")
+    phys.add_argument("--quiet", action="store_true")
+
+    for parser_ in (run, drill_pitr, phys):
+        parser_.add_argument(
+            "--notify", metavar="ENV_VAR",
+            help="POST the verdict to the webhook URL held in this variable (Slack, "
+                 "Discord, Mattermost, or any endpoint). The name, never the URL: a "
+                 "webhook URL is a credential")
+        parser_.add_argument("--notify-on", choices=("fail", "always"), default="fail",
+                             help="when to notify (default: fail -- including COULD NOT VERIFY)")
+
     sub.add_parser("clean", help="remove containers left behind by a crash")
     sub.add_parser("doctor", help="check the environment before trusting a run")
     return parser
@@ -143,6 +180,16 @@ def main(argv: list[str] | None = None) -> int:
     # for and still print a pass.
     try:
         cfg = _load_config(args)
+        if args.command == "physical":
+            if args.image and "{major}" not in args.image:
+                raise config.ConfigError("--image needs a {major} slot")
+            result = drill.run_physical(
+                args.tool, repo=args.repo, stanza=args.stanza, backup=args.backup,
+                target=args.target, database=args.database, cfg=cfg,
+                flavour=args.image or cfg.image or "", pin_major=args.postgres,
+                max_age=_duration(args.max_age) if args.max_age else None,
+                fail_on=args.fail_on, ready_timeout=args.ready_timeout)
+            return _emit(result, args)
         if args.command == "pitr":
             result = drill.run_pitr(
                 args.base, args.wal, args.target, cfg=cfg,
@@ -228,6 +275,15 @@ def _emit(result, args) -> int:
         else:
             with open(args.json, "w", encoding="utf-8") as handle:
                 handle.write(blob + "\n")
+    if getattr(args, "notify", None):
+        from . import notify
+        try:
+            notify.send(result, args.notify, args.notify_on)
+        except notify.NotifyError as exc:
+            # The drill's verdict stands; an alert that did not go out is said
+            # loudly rather than swallowed, and fails the run.
+            print(f"firedrill: could not notify: {exc}", file=sys.stderr)
+            return result.exit_code or 1
     return result.exit_code
 
 

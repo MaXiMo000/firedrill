@@ -85,6 +85,7 @@ firedrill run path/to/dump.dump            # restore and report
 firedrill run s3://backups/pg/daily/       # the newest object under a prefix
 firedrill run --live DATABASE_URL --keep backups/   # dump a running database now, prove it restores
 firedrill run dump.dump --image 'pgvector/pgvector:pg{major}'  # extensions the stock image lacks
+firedrill physical pgbackrest --repo DIR --target "..."      # pgBackRest / WAL-G, with PITR -- see below
 firedrill run dump.dump --json report.json # machine-readable
 firedrill run dump.dump --rto 45m          # exceeding the budget is a finding
 firedrill run dump.dump --tier fast        # schema only, for every commit
@@ -199,6 +200,38 @@ supplies.
 
 A plain dump can only be restored whole, so the `fast` and `sample` tiers
 refuse it (`TIER_UNSUPPORTED`) instead of quietly running a full restore.
+
+## MySQL and MariaDB
+
+`firedrill run backup.sql` recognises a `mysqldump` or `mariadb-dump` file
+(plain or `.gz`) by its own header and takes the same path Postgres does:
+the server version comes from the dump, the restore runs in `mysql:<version>`
+or `mariadb:<version>`, and then it runs smoke, your `semantics:` checks, and
+`CHECK TABLE` on every restored table.
+
+- **Truncation.** Both tools end a finished dump with `-- Dump completed on
+  ...`. The `mysql` client restores a dump cut at a statement boundary with
+  exit 0, so a missing trailer is `ARCHIVE_TRUNCATED` (critical) before
+  anything is restored.
+- **Errors.** The client stops at the first failing statement; its
+  `ERROR nnnn (state) at line N` becomes a finding naming the line, since
+  everything after it was never restored.
+- **MariaDB 10.5.25+/11.x** dumps open with a `/*M!999999\- enable the
+  sandbox mode */` line before the header -- the reason they won't load into
+  MySQL. firedrill reads past it and restores them into MariaDB.
+- The password reaches the client through `MYSQL_PWD` inside the container,
+  never argv.
+
+Tested on [datacharmer/test_db](https://github.com/datacharmer/test_db)'s
+employees database (300,024 employees, 2,844,047 salary rows), dumped by
+each engine's own tool:
+
+| dump | result |
+|---|---|
+| MySQL 8.4, 168 MB | PASS: 8 tables, both exact counts, `CHECK TABLE` clean (restore 63 s) |
+| MariaDB 11.4, 172 MB, with the sandbox-mode line | PASS (restore 25 s) |
+| the MySQL dump gzipped, 36 MB | PASS |
+| the MySQL dump cut off at 80 MB | FAIL: `ARCHIVE_TRUNCATED`, the client's `ERROR 1064 at line 265`, 7 of 8 tables, both counts wrong |
 
 ## Which PostgreSQL versions
 
@@ -403,6 +436,97 @@ The history file holds counts, durations and versions — aggregates and
 catalog facts. It has no field that could hold a row, which is pinned by a
 test, because it is the artefact of this tool most likely to be committed to
 a repo by accident.
+
+## pgBackRest and WAL-G
+
+Most production Postgres isn't backed up with `pg_dump` at all. It's
+backed up with [pgBackRest](https://pgbackrest.org) or
+[WAL-G](https://github.com/wal-g/wal-g): a base backup plus a WAL archive.
+firedrill restores those **with the tool itself**, replays the WAL, and puts
+the recovered server through the same checks:
+
+```
+$ firedrill physical pgbackrest --repo /backups/pgbackrest --target "2026-09-26 20:28:59+00" --config boundary.yml
+  backup    pgBackRest 20260926-202837F  stanza demo  finished 2026-09-26T20:28:56+00:00
+  source    PostgreSQL 16  -> recovered to 2026-09-26 20:28:59+00 on postgres:16
+
+  [ok  ] recover    23.81s  20260926-202837F -> 2026-09-26 20:28:59+00
+  [ok  ] smoke       0.84s  shop: 2 table(s)
+  [ok  ] semantics   0.72s  2 check(s) in shop
+  [ok  ] integrity   2.39s  1 sequence(s)
+
+  PASS -- recovered to the target, and the boundary is where it should be.
+```
+
+```bash
+firedrill physical pgbackrest --repo DIR                 # newest backup, all archived WAL
+firedrill physical walg --repo DIR --target "2026-09-26 20:30:23+00"
+firedrill physical pgbackrest --stanza main --postgres 16  # a remote (S3/GCS/Azure) repository
+firedrill physical walg --repo DIR --max-age 26h          # and the newest backup must be recent
+```
+
+- The major version comes from the repository (`backup.info`, the WAL-G stop
+  sentinel), and the restore runs in `postgres:<major>` with the tool added:
+  pgBackRest from the image's own PGDG repository, WAL-G's release binary
+  pinned by sha256. `--image` takes a `{major}` template for extension images.
+- **A remote repository** is configured the way the tools are always
+  configured -- `PGBACKREST_REPO1_TYPE=s3`, `WALG_S3_PREFIX`, `AWS_*`, and so
+  on. Those variables are passed to the container **by name**, never value.
+- **It never archives into the repository it checks.** A restored data
+  directory carries production's own `archive_command`; started as it is, the
+  drill would push WAL into production's archive. The server is started with
+  `-c archive_mode=off` (which outranks every file), and then *asked*: if it
+  reports anything but `off`, the drill stops with `ARCHIVING_ENABLED`.
+  Tested with a backup that carries `archive_mode = 'on'` from `ALTER SYSTEM`:
+  the repository held the same WAL files before and after. A local
+  repository is also mounted read-only.
+
+Measured against repositories made by pgBackRest 2.59.1 and WAL-G v3.0.9
+themselves (built by `tests/make_physical.py`, in CI):
+
+| case | result |
+|---|---|
+| replay all archived WAL | PASS: all 3 tables back, including the 2 written after the backup |
+| recover to the timestamp between `before_target` and `after_target` | PASS: exactly one of them |
+| a target later than the archive | FAIL `PITR_TARGET_UNREACHED` |
+| a target before every backup (retention already pruned what you'd need) | FAIL `PITR_TARGET_BEFORE_BACKUP` |
+| 64 bytes zeroed in one pgBackRest file | FAIL `RESTORE_FAILED`: *zlib threw error: [-3] data error* |
+| newest backup older than `--max-age` | FAIL `BACKUP_STALE` |
+
+A restore that ran and broke says **FAIL**: the backup was tested, and it is
+broken. COULD NOT VERIFY stays reserved for a check that could not happen.
+
+## Alerts, and running it on a schedule
+
+```bash
+export BACKUP_ALERTS=https://hooks.slack.com/services/...
+firedrill physical pgbackrest --repo /backups --max-age 26h --notify BACKUP_ALERTS
+```
+
+`--notify ENV_VAR` POSTs one JSON message when a drill fails **or could not
+run**. It carries `text` (Slack, Mattermost) and `content` (Discord) with a
+one-line verdict, plus `ok`, `verified`, `worst` and the finding rules for
+anything else. `--notify-on always` reports passes too. The argument is the
+variable's *name*: a webhook URL is a credential. A webhook that refuses the
+message fails the run rather than being skipped quietly, and its URL never
+appears in the error.
+
+Without GitHub Actions, a systemd timer on any host with Docker does it:
+
+```ini
+# /etc/systemd/system/firedrill.service
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/firedrill.env          # BACKUP_ALERTS=..., PGBACKREST_REPO1_* ...
+ExecStart=/usr/local/bin/firedrill physical pgbackrest --stanza main --postgres 16 --max-age 26h --notify BACKUP_ALERTS
+
+# /etc/systemd/system/firedrill.timer
+[Timer]
+OnCalendar=*-*-* 04:17:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+```
 
 ## Point-in-time recovery
 
