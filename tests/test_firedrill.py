@@ -562,7 +562,7 @@ def test_nonzero_exit_with_no_stderr_is_never_a_pass():
 
 
 def test_exit_zero_with_errors_is_caught():
-    """PLAN.md §3.3's scenario. Measured exit codes were 1, but the guard stays:
+    """Errors with exit 0. Measured exit codes were 1, but the guard stays:
     the tool must not depend on that remaining true."""
     findings, _ = restore.parse_stderr(ROLE_TRANSCRIPT, 0)
     check("both the cause and the lie are reported",
@@ -716,7 +716,7 @@ def test_human_report_renders_every_stage_status():
     the last thing that may crash."""
     report = _blank_report(verified=True)
     statuses = [drill.OK, drill.FAILED, drill.NOT_RUN, drill.NOT_CONFIGURED,
-                "a status from a later phase"]
+                "an unrecognised status"]
     for stage, status in zip(report.stages, statuses):
         stage.status = status
     text = reporting.human(report)
@@ -760,7 +760,7 @@ def test_report_never_prints_a_registered_secret():
 # --------------------------------------------------------------------- cli --
 
 def test_cli_exposes_no_credential_or_dsn_flags():
-    """PLAN.md §7: /proc/*/cmdline is world-readable and CI logs echo commands."""
+    """/proc/*/cmdline is world-readable and CI logs echo commands."""
     help_text = _help_of(build_parser())
     for banned in ("--dsn", "--password", "--pgpassword", "--conn"):
         check(f"{banned} is absent", banned in help_text, False)
@@ -878,7 +878,7 @@ def _rejects(label: str, text: str, expect_phrase: str = ""):
 
 
 def test_config_reads_the_documented_example():
-    """The other direction. A loader that rejects PLAN.md §6's own example is
+    """The other direction. A loader that rejects the documented example is
     exactly as broken as one that accepts nonsense."""
     cfg = config.loads(GOOD_CONFIG)
     check("tier", cfg.tier, "full")
@@ -904,7 +904,7 @@ def test_config_semantic_check_evaluates_both_ways():
 
 
 def test_config_ignore_without_a_reason_is_an_error():
-    """PLAN.md §6: an unexplained suppression is a config error, not a warning."""
+    """An unexplained suppression is a config error, not a warning."""
     _rejects("no reason key", """
 version: 1
 ignore:
@@ -934,7 +934,7 @@ volume:
 
 
 def test_config_expect_must_be_a_comparison_not_a_row():
-    """PLAN.md §7 enforced by the schema: there is no way to write a check
+    """Enforced by the schema: there is no way to write a check
     whose result is echoed verbatim."""
     for bad in ("the newest order", "SELECT email FROM app_user", "> ", "0"):
         _rejects(f"expect {bad!r}", f"""
@@ -986,9 +986,7 @@ def test_config_dsn_target_is_refused_until_its_interlocks_exist():
 
 
 def test_config_jobs_defaults_to_one_and_validates():
-    """restore.py has taken a jobs parameter since Phase 1; nothing called it
-    with anything but the default until this session. Pinning both the
-    default and the validation so it stays reachable."""
+    """Pins both the default and the validation so --jobs stays reachable."""
     check("default is 1", config.loads("version: 1\n").jobs, 1)
     check("a real value loads", config.loads("version: 1\njobs: 4\n").jobs, 4)
     _rejects("zero", "version: 1\njobs: 0\n", "positive integer")
@@ -1007,10 +1005,8 @@ def test_config_empty_file_is_an_error():
 
 
 def test_config_tolerance_now_that_history_gives_it_a_baseline():
-    """This was refused for two phases, because a tolerance needs something to
-    be tolerant *of* and nothing recorded one. history.json does now, so the
-    key is read rather than refused -- and the refusal was removed in the same
-    commit that made it readable, not before."""
+    """A tolerance needs something to be tolerant *of*; history.json records
+    it, so the key is read rather than refused."""
     cfg = config.loads(
         "version: 1\nvolume:\n  tolerance: 10%\n"
         "  tables:\n    orders: {tolerance: 50%}\n")
@@ -1150,9 +1146,8 @@ def test_action_shell_scripts_are_valid_bash():
 
 
 def test_ci_exercises_the_action_it_ships():
-    """Phase 0's CI workflows sat unrun until something was pushed, and the
-    first execution found a real bug. The action is the same kind of artefact,
-    so the workflow that runs it is pinned here rather than hoped for."""
+    """A workflow nobody runs is unverified. The action is the same kind of
+    artefact, so the workflow that runs it is pinned here rather than hoped for."""
     import yaml as yaml_module
     ci = yaml_module.safe_load(
         (HERE.parent / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
@@ -1167,7 +1162,7 @@ def test_ci_exercises_the_action_it_ships():
 
 
 def test_example_workflows_parse_and_pin_their_intent():
-    """They are the phase's deliverable -- a stranger copies these."""
+    """A stranger copies these, so they must parse and say what they mean."""
     import yaml as yaml_module
     examples = sorted((HERE.parent / "examples").glob("*.yml"))
     check("examples exist", len(examples) >= 2, True)
@@ -1485,7 +1480,7 @@ def test_integration_probe_reads_a_real_daemon():
           bool(why.strip()), True)
 
 
-# The Phase 1 ladder, asserted against real broken backups. Every fixture
+# The ladder, asserted against real broken backups. Every fixture
 # below restores with zero pg_restore findings -- that is measured, not
 # assumed -- so each of these is a failure that only a restored database can
 # show you.
@@ -1529,7 +1524,7 @@ def test_integration_volume_drop_is_caught_by_volume_alone():
 
 
 def test_integration_stale_replica_is_caught_by_semantics_alone():
-    """PLAN.md §8: the fixture that justifies the whole project. The schema is
+    """The fixture that justifies the whole project. The schema is
     right, the row count is right, and the data is a year old."""
     needs_docker()
     report = _ladder_run("stale_replica.dump")
@@ -1719,7 +1714,7 @@ def test_integration_write_reference_does_not_also_compare():
 
 
 def test_integration_collation_is_silent_on_a_matching_libc():
-    """PLAN.md §3.4 is the loudest check in the tool, which makes a false
+    """Collation is the loudest check in the tool, which makes a false
     positive here especially expensive. The default Debian target matches the
     reference it wrote, so it must say nothing at all."""
     needs_docker()
@@ -1767,9 +1762,9 @@ def test_integration_unverifiable_collation_needs_no_reference():
 
 
 def test_integration_missing_extension_is_caught():
-    """PLAN.md §3.3's other half, and the last §8 fixture.
+    """A missing extension.
 
-    The Phase 0 classifier carried an EXTENSION_ABSENT pattern that no fixture
+    The classifier carried an EXTENSION_ABSENT pattern that no fixture
     had ever exercised. This is the first time it has been shown to fire
     against a real pg_restore, on a target image whose hstore control file has
     been removed -- which is what a real recovery host without the binaries
@@ -1808,7 +1803,7 @@ def test_integration_restored_into_major_is_measured_not_assumed():
 
 
 def test_integration_pinning_an_older_major_is_caught_before_the_restore():
-    """PLAN.md §8's wrong_major_version. It always failed; it just failed as a
+    """wrong_major_version. It always failed; it just failed as a
     generic 'could not execute query' several stages later, which does not
     tell you that the pin was the problem."""
     needs_docker()
@@ -1844,7 +1839,7 @@ def test_version_compare_handles_pre_10_majors():
 
 
 def test_integration_fast_tier_never_looks_like_a_full_pass():
-    """PLAN.md §3.5, stated as an experiment on one backup.
+    """Tiers, stated as an experiment on one backup.
 
     stale_replica fails semantics on a full run. On a fast run the rows were
     never restored, so the honest outcome is NOT RUN -- not a failure, and
@@ -1907,8 +1902,8 @@ def test_integration_fast_tier_misses_what_it_says_it_misses():
 
 
 # ------------------------------------------------------------- sources -----
-# PLAN.md §9 Phase 2's exit condition is "runs against a real bucket with
-# read-only credentials". A real AWS bucket is not something a test suite may
+# The S3 source must work against a real bucket with read-only credentials.
+# A real AWS bucket is not something a test suite may
 # create, so these run against S3Mock: a real S3 server speaking the real
 # protocol over a real socket, with credentials taken from the environment
 # exactly as §7 requires. What that does NOT prove is AWS-specific IAM
@@ -2258,7 +2253,7 @@ volume:
 
 
 # ---------------------------------------------------------------- pitr -----
-# PLAN.md §9 Phase 4. The fixture's write timeline is the test: the base backup
+# The fixture's write timeline is the test: the base backup
 # is taken BEFORE any writes, so recovery has to replay WAL to see them at all.
 
 BOUNDARY_CONFIG = """
@@ -2678,7 +2673,7 @@ def test_integration_a_reference_survives_a_major_upgrade():
 
 
 def test_integration_every_restorable_format_works():
-    """PLAN.md §5 asks for custom, directory and tar. All three carry a PGDMP
+    """Custom, directory and tar all carry a PGDMP
     header -- directory and tar keep theirs in a toc.dat member -- so the major
     version can be read out of each without a PostgreSQL client, which is what
     the version-matching depends on.

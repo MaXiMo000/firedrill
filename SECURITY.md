@@ -8,13 +8,11 @@ issue for anything exploitable.
 ## What this tool is trusted with
 
 firedrill restores database backups, which means it handles real customer data
-during a run. The design constraints that follow from that live in `PLAN.md`
-§7; the ones enforced in code today are:
+during a run. The constraints enforced in code are:
 
 - **It only ever uses a target it created itself.** There is no code path that
   connects to a user-supplied DSN, so there is no code path that can be aimed
-  at production by accident. The DSN target and its interlocks arrive with a
-  later phase.
+  at production by accident.
 - **The source is mounted read-only.** "Never writes to the backup" is a
   property of the bind mount, not a promise about our own code.
 - **No credentials on the command line.** There is no `--dsn` and no

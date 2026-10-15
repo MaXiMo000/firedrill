@@ -314,7 +314,7 @@ def read_plain_header(path: str | pathlib.Path) -> ArchiveHeader:
     complete = True
     try:
         if gzipped:
-            # ponytail: streams the whole file to see its end; a gzip stream
+            # Streams the whole file to see its end; a gzip stream
             # can't seek. A cut-off gzip raises EOFError: that's a truncated
             # dump, not an unreadable one.
             tail = ""

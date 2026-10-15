@@ -93,7 +93,7 @@ def human(report: Report, colour: bool = False) -> str:
         lines.append("")
 
     if report.suppressed:
-        # Suppressed is not deleted. PLAN.md §6 requires a written reason for
+        # Suppressed is not deleted. The config requires a written reason for
         # every ignore, and the report prints it, so a green run always shows
         # what was set aside to make it green.
         lines.append(f"  {len(report.suppressed)} suppressed by config:")
@@ -113,7 +113,7 @@ def human(report: Report, colour: bool = False) -> str:
 
 
 def _tier_note(report: Report) -> str:
-    """PLAN.md §3.5: say which tier ran, every time.
+    """Say which tier ran, every time.
 
     A schema-only pass and a full pass are different claims about a backup,
     and a reader who cannot tell them apart has been misled by a green tick.

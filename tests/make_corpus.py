@@ -8,10 +8,9 @@ provenance nobody remembers. Needs Docker; without it, it says so and exits
 non-zero rather than producing an empty corpus that tests would then "pass"
 against.
 
-Phase 0 builds the fixtures Phase 0 can actually assert on. The remaining
-PLAN.md §8 fixtures are listed at the bottom with the technique each needs --
-a fixture with no check behind it is a silent skip wearing a costume, so they
-arrive with the checks that read them.
+Each fixture exists because a check asserts on it -- a fixture with no check
+behind it is a silent skip wearing a costume. The techniques behind the harder
+ones are listed at the bottom.
 """
 
 from __future__ import annotations
@@ -423,8 +422,7 @@ def build(outdir: pathlib.Path = DEFAULT_OUT) -> dict:
     return made
 
 
-# Everything PLAN.md §8 lists is now built, three of them without the
-# purpose-built images that were assumed necessary:
+# Three fixtures need no purpose-built image:
 #
 #   collation_mismatch  -> no fixture needed. The alpine images are musl and
 #                          the default Debian ones are glibc, so

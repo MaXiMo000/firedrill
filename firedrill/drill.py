@@ -1,4 +1,4 @@
-"""The Phase 0 ladder: inspect -> target -> restore -> smoke, each timed.
+"""The drill: inspect -> target -> restore -> smoke -> ladder, each timed.
 
 The single rule this module exists to enforce: a stage that could not run is
 recorded as NOT RUN and the drill is not verified. There is no path through
@@ -633,7 +633,7 @@ def _suppress(report: Report, cfg) -> Report:
     """Move ignored findings aside -- recorded with their reason, not deleted.
 
     A suppressed finding still appears in the report, under the reason its
-    author wrote (PLAN.md §6). Deleting it outright would make the config a
+    author wrote. Deleting it outright would make the config a
     way to make problems invisible, which is the opposite of the point.
     """
     kept = []
@@ -974,7 +974,7 @@ def _run(dump_path: str | pathlib.Path | None = None, *, flavour: str = "",
         # not ask for say "not configured", which is the honest thing for a
         # report to say and is not the same as a tick.
         if cfg.tier == "fast":
-            # PLAN.md §3.5. A schema-only restore contains no rows, so every
+            # A schema-only restore contains no rows, so every
             # table would count zero and every minimum would "fail" -- or, with
             # no rules configured, the rung would show a tick for a question it
             # never asked. Neither is honest, so it did not run.
@@ -1037,7 +1037,7 @@ def _run(dump_path: str | pathlib.Path | None = None, *, flavour: str = "",
             if cfg.tier == "fast"
             else "collation only -- a sampled restore does not carry setval")
     finally:
-        # PLAN.md §7: teardown in a finally, always.
+        # Teardown in a finally, always.
         container.teardown()
 
     report.total_seconds = time.monotonic() - began
@@ -1058,7 +1058,7 @@ def _run(dump_path: str | pathlib.Path | None = None, *, flavour: str = "",
 # restore that still fits. It exists so a first run on a nearly-full disk
 # fails with "not enough space" instead of a `pg_restore` error two minutes
 # into a container nobody can read the message of.
-# ponytail: fixed floor, not sized from the archive; raise it, or make it
+# A fixed floor, not sized from the archive; raise it, or make it
 # `size_of(dump) * N`, if a real restore is ever seen to need more.
 _MIN_SCRATCH_BYTES = 1 * 1024**3
 

@@ -27,11 +27,8 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      # Install what pyproject declares, rather than naming packages here.
-      # Phase 0 was stdlib-only and this step did not exist; Phase 1 added
-      # PyYAML and the suite failed on a clean runner while passing locally,
-      # where it happened to already be installed. Installing the project
-      # itself means the dependency list cannot drift away from CI again.
+      # Install what pyproject declares, rather than naming packages here, so
+      # the dependency list cannot drift away from what CI installs.
       - name: Install the package and its declared dependencies
         # .[s3] because the S3 source tests must genuinely run on Linux, where
         # --require-integration turns a skip into a build failure. Installing
@@ -106,9 +103,8 @@ jobs:
           fi
 
   action:
-    # The action shipped in this repo, run against this repo. It was written
-    # in Phase 3 and had never executed -- and an action nobody has run is the
-    # same unverified control this whole tool exists to complain about.
+    # The action shipped in this repo, run against this repo: an action nobody
+    # has run is the same unverified control this tool exists to catch.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

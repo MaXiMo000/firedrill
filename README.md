@@ -5,6 +5,8 @@
 
 **You don't have backups. You have hopes.**
 
+<p align="center"><img src="https://raw.githubusercontent.com/MaXiMo000/firedrill/main/docs/demo.svg" alt="firedrill restoring a dump that was cut off mid-write and reporting ARCHIVE_TRUNCATED, which psql alone restores with exit 0" width="100%"></p>
+
 firedrill takes a Postgres backup and *actually restores it* into a disposable,
 version-matched container, then reports whether it worked and how long each
 stage took. It is built to fail your build the day a backup stops being
@@ -22,12 +24,12 @@ confidence.
 
 ## Status
 
-**Phases 0–4.** Fetch (local, presigned URL, or S3, checksum-verified when you
+Fetch (local, presigned URL, or S3, checksum-verified when you
 supply a digest — and reported as unverified when you do not),
 restore into an ephemeral version-matched container, then the ladder:
 structure, volume, semantics, integrity. Three tiers, JUnit and JSON output,
 a history file that turns RTO into a measured trend, a GitHub Action, and
-point-in-time recovery. See `PLAN.md` for what is deliberately not built.
+point-in-time recovery.
 
 What works today:
 
@@ -368,14 +370,14 @@ each is also asserted *not* to fire on a healthy one. A false positive costs
 exactly what a false negative costs: a DR tool that cries wolf gets muted, and
 a muted DR tool is worse than none because it still looks like coverage.
 
-## A correction to the plan
+## Why the exit code is not enough
 
-`PLAN.md` §3.3 says a missing role or extension surfaces as a `pg_restore`
-*warning* **with a zero exit code**. Measured on PostgreSQL 16 and 18 with
-custom-format archives, that is not what happens: the exit code was `1` in every
-broken case, accompanied by `warning: errors ignored on restore: N`.
+A missing role or extension is often described as a `pg_restore` *warning*
+**with a zero exit code**. Measured on PostgreSQL 16 and 18 with custom-format
+archives, that is not what happens: the exit code was `1` in every broken case,
+accompanied by `warning: errors ignored on restore: N`.
 
-The exit code is still not sufficient, for reasons that survive the correction:
+The exit code is still not sufficient:
 it is one bit, so it says *something* broke but never *what*, and "role absent"
 and "archive truncated" need different findings and different fixes. firedrill
 therefore uses both signals and reports which one fired — with `EXIT_CODE_LIED`
@@ -594,7 +596,7 @@ This tool restores databases, so the interlocks are the price of admission:
 - Teardown runs in a `finally`, and `firedrill clean` removes anything a crash
   orphaned.
 
-See `SECURITY.md` and `PLAN.md` §7.
+See `SECURITY.md`.
 
 ## Development
 

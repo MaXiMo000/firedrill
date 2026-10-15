@@ -1,0 +1,27 @@
+name: Bug report
+description: Something gave a wrong result, crashed, or did not run
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The command you ran and the output you got. Remove anything secret first.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "Output of `pip show firedrill`"
+  - type: input
+    id: env
+    attributes:
+      label: OS and Python version

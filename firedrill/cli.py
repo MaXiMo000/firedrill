@@ -1,8 +1,8 @@
 """firedrill command line.
 
-No --dsn and no --password, by design (PLAN.md §7): /proc/*/cmdline is
-world-readable and CI logs echo command lines. Phase 0 needs neither, because
-the only target it can build is one it created itself.
+No --dsn and no --password, by design: /proc/*/cmdline is world-readable and
+CI logs echo command lines. Neither is needed, because the only target it can
+build is one it created itself.
 """
 
 from __future__ import annotations

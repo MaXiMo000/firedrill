@@ -1,12 +1,11 @@
 """The ephemeral restore target.
 
-Safety notes, because this is the module that could hurt someone (PLAN.md §7):
+Safety notes, because this is the module that could hurt someone:
 
 * firedrill only ever talks to a container it created itself. There is no
   code path here that connects to a DSN, so there is no code path that can be
-  pointed at production by accident. The user-supplied-DSN target and its four
-  interlocks arrive with a later phase; until then the safest implementation
-  of "refuses any target it did not create" is to have no other target.
+  pointed at production by accident: the safest implementation of "refuses
+  any target it did not create" is to have no other target.
 * No port is published. Everything goes through `docker exec`, so the instance
   is not reachable from the host at all and there is no listening surface to
   bind a password to.
@@ -114,7 +113,7 @@ def image_for(major: str, flavour: str = "") -> str:
 
     The alpine variants are musl libc. Restoring a glibc-built production dump
     into musl guarantees a collation-environment mismatch, which is precisely
-    the silent corruption PLAN.md §3.4 exists to detect. Defaulting to alpine
+    the silent corruption the collation check exists to detect. Defaulting to alpine
     would mean the default target poisons the tool's own flagship check.
     """
     # A whole image with a {major} slot -- pgvector/pgvector:pg{major},

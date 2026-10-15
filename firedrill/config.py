@@ -7,13 +7,13 @@ mode that would otherwise be silent:
   loader ignores means a check the user believes is running is not running,
   and the run goes green. That is the exact shape of failure this whole
   project exists to catch, so it is not tolerated in our own config.
-* A key for a phase that is not built yet is an error naming the phase. A
+* A key for a feature that is not built is an error naming it. A
   parsed-and-ignored setting is a silent skip wearing a config file's clothes.
-* An `ignore:` entry with no written reason is an error (PLAN.md §6). An
+* An `ignore:` entry with no written reason is an error. An
   unexplained suppression is how a green run stops meaning anything.
 * A `semantics.expect` must be a comparison against a number. The config
   schema structurally cannot express "print this query's result", which is
-  how PLAN.md §7's "smoke queries return shapes, never rows" is enforced by
+  how "smoke queries return shapes, never rows" is enforced by
   the parser rather than by reviewer discipline.
 """
 
@@ -124,7 +124,7 @@ class SemanticCheck:
 
 
 IMPLEMENTED_SOURCES = ("local", "https", "s3", "live")
-# gcs is PLAN.md §9 Phase 2 as written, and is refused rather than half-built:
+# gcs is recognised but refused rather than half-built:
 # there is no way to verify it here, and an unverified source is a way to fail
 # to fetch a backup while reporting something reassuring.
 ALL_SOURCES = ("local", "https", "s3", "live", "gcs")
@@ -222,9 +222,8 @@ def loads(text: str, path: pathlib.Path | None = None) -> Config:
     if target_type != "docker":
         raise ConfigError(
             f"target.type {target_type!r} is not available. Only `docker` "
-            "exists: the safest implementation of PLAN.md §7's 'refuses any "
-            "target it did not create' is to have no other target. The dsn "
-            "target arrives with its four interlocks."
+            "exists: the safest implementation of 'refuses any target it did "
+            "not create' is to have no other target."
         )
 
     # -- tier --------------------------------------------------------------
@@ -239,8 +238,7 @@ def loads(text: str, path: pathlib.Path | None = None) -> Config:
     history_path = pathlib.Path(history) if history else None
 
     # -- jobs ----------------------------------------------------------
-    # restore.py has taken this parameter since Phase 1; nothing called it
-    # with anything but the default until now. pg_restore's own --jobs
+    # pg_restore's own --jobs
     # needs no format check here -- an archive it cannot parallelise (a
     # single-table dump, say) just restores serially, no differently from
     # today, so there is no wrong value short of the type itself.
@@ -261,7 +259,7 @@ def loads(text: str, path: pathlib.Path | None = None) -> Config:
     volume = _require_mapping(raw.get("volume"), "volume")
     _reject_unknown(volume, ("tolerance", "tables"), "volume")
     # A tolerance is a comparison against the last known-good restore, and
-    # nothing records one until history.json arrives in Phase 3. Parsing it and
+    # nothing records one without a history file. Parsing it and
     # then never reading it would be precisely the silently-ignored key that
     # _reject_unknown exists to prevent -- the rule has to bind its author too.
     volume_tolerance = (
@@ -494,8 +492,8 @@ def _parse_semantics(raw) -> list[SemanticCheck]:
             raise ConfigError(
                 f"{where} ({name}) has expect {expect!r}, which is not a "
                 "comparison against a number. Write '> 0', '== 0', '>= 100'. "
-                "Only comparisons are expressible, because PLAN.md §7 forbids a "
-                "check whose result is echoed verbatim -- the query returns a "
+                "Only comparisons are expressible, because a check whose "
+                "result is echoed verbatim could leak data -- the query returns a "
                 "count and the config compares it, so no row value can reach a "
                 "report."
             )
@@ -522,8 +520,8 @@ def _parse_ignore(raw) -> dict[str, str]:
         reason = str(entry.get("reason") or "").strip()
         if not reason:
             raise ConfigError(
-                f"{where} suppresses {check} with no written reason. PLAN.md §6: "
-                "every ignore requires one, and an unexplained suppression is a "
+                f"{where} suppresses {check} with no written reason. "
+                "Every ignore requires one, and an unexplained suppression is a "
                 "config error rather than a warning. It is the one piece of "
                 "process this tool imposes, and it is what keeps a green run "
                 "meaning something."

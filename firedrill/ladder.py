@@ -1,4 +1,4 @@
-"""The Phase 1 rungs: volume, semantics, integrity.
+"""The ladder rungs: volume, semantics, integrity.
 
 Each is independently reportable and each distinguishes three outcomes, not
 two: it passed, it failed, or it could not run. The third is the one that
@@ -7,11 +7,11 @@ matters. `drill.py` renders "not configured" and "not run" differently from
 volume rule existed.
 
 Kept flat, next to archive.py / docker.py / restore.py, because that is how
-this package is already laid out. PLAN.md §5 sketches a stages/ package; four
-functions of forty lines do not need six files and an __init__.
+this package is already laid out; four functions of forty lines do not need
+six files and an __init__.
 
 Every query here returns a count, a boolean or a catalog row -- never user
-data (PLAN.md §7).
+data.
 """
 
 from __future__ import annotations
@@ -41,9 +41,8 @@ def _quote(identifier: str) -> str:
 # --------------------------------------------------------------- structure --
 
 # One line per catalog object, sorted by the database so the snapshot is
-# stable, reviewable and diffable in a pull request (PLAN.md §3.7 prefers a
-# committed reference over a live production connection for exactly that
-# reason). Deliberately not `pg_dump --schema-only`: that output is enormous,
+# stable, reviewable and diffable in a pull request (a committed reference
+# is preferred over a live production connection for exactly that reason). Deliberately not `pg_dump --schema-only`: that output is enormous,
 # reorders itself between versions, and diffs badly.
 _SNAPSHOT = """
 select 'column', n.nspname||'.'||c.relname||'.'||a.attname,
@@ -435,7 +434,7 @@ def _collation_line(text: str) -> str:
 
 
 def collation(container, cfg, database: str) -> tuple[list[Finding], dict]:
-    """PLAN.md §3.4, the silent one -- reported loudly because nothing else will.
+    """Collation, the silent one -- reported loudly because nothing else will.
 
     Two distinct facts, measured on real containers rather than assumed:
 
@@ -616,7 +615,7 @@ def integrity(container, cfg, database: str,
       that this tool performs -- the check would cost a full scan per
       constraint to confirm something pg_restore already refused to let
       through. It arrives if and when a restore mode that can produce one does.
-    * amcheck. PLAN.md §2 lists it and it is not here, which is worth saying
+    * amcheck. It is not here, which is worth saying
       out loud rather than leaving as an absence. `bt_index_check` verifies
       B-tree structure, and the honest obstacle is verification: proving the
       check FIRES needs a genuinely corrupt index, which means manufacturing

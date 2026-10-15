@@ -2,8 +2,8 @@
 
 Every source here is **read-only by construction**. There is no code path in
 this module that writes, deletes, copies or tags anything at the origin --
-not because we promise not to, but because the verbs are absent. PLAN.md §7's
-"never writes to the source" is then a property of the file rather than a
+not because we promise not to, but because the verbs are absent. "Never
+writes to the source" is then a property of the file rather than a
 claim in a README.
 
 Credentials come from the environment only. There is no --access-key and no

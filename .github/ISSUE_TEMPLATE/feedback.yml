@@ -1,0 +1,14 @@
+name: Feedback or use case
+description: Tell us how you use it, what is missing, or what got in the way
+labels: [feedback]
+body:
+  - type: textarea
+    id: use
+    attributes:
+      label: What are you using it for?
+    validations:
+      required: true
+  - type: textarea
+    id: friction
+    attributes:
+      label: What got in the way, or what is missing?

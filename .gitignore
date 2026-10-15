@@ -13,3 +13,11 @@ tests/corpus/
 .env.*
 *.pem
 *.key
+
+# Local-only material: notes, plans, assistant config, secrets
+.dev/
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+!.env.example
+.DS_Store

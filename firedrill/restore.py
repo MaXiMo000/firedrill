@@ -1,6 +1,6 @@
 """Run the restore inside the target container and read what it actually said.
 
-The premise of Phase 0 is that `pg_restore`'s exit code is one bit and a
+The premise here is that `pg_restore`'s exit code is one bit and a
 restore can fail in many more ways than that. Everything below was written
 against measured output rather than recollection; the transcripts are pinned
 in tests/test_firedrill.py.
@@ -14,8 +14,8 @@ What the measurements showed (PostgreSQL 16 and 18, custom format):
     truncated mid-data      exit 1, 'error: could not read from input file:
                             end of file'
 
-Note this contradicts PLAN.md §3.3, which says these surface "as pg_restore
-*warnings* with a zero exit code". For custom-format archives they do not --
+These are often described as surfacing "as pg_restore *warnings* with a zero
+exit code". For custom-format archives they do not --
 the exit code was 1 in every broken case measured. The exit code is still not
 sufficient, for two reasons that survive that correction:
 
@@ -172,7 +172,7 @@ def parse_stderr(stderr: str, exit_code: int) -> tuple[list[Finding], int]:
             evidence=(stderr or "").strip() or "(no stderr captured)",
         ))
 
-    # And the inverse, which is the case PLAN.md §3.3 was reaching for: errors
+    # And the inverse: errors
     # present while the process claims success.
     if exit_code == 0 and (findings or errors_ignored):
         findings.append(Finding(
@@ -261,7 +261,7 @@ def run_restore(container, jobs: int = 1, tier: str = "full",
     `tier` is "full" or "fast". A fast run passes --schema-only, which
     restores every object and no rows. That makes the row-reading rungs
     meaningless rather than passing, which drill.py handles by marking them
-    NOT RUN -- see PLAN.md §3.5: a pass from a schema-only run must never look
+    NOT RUN: a pass from a schema-only run must never look
     like a pass from a full one.
     """
     from .docker import DUMP_PATH
@@ -349,7 +349,7 @@ def _restore_plain(container, gzipped: bool) -> RestoreResult:
 def smoke(container) -> tuple[list[Finding], dict]:
     """Prove the restored database answers questions, not just that a process exited.
 
-    Counts only. Nothing here returns a row value -- see PLAN.md §7.
+    Counts only. Nothing here returns a row value.
     """
     findings: list[Finding] = []
 
