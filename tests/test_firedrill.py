@@ -981,8 +981,8 @@ def test_config_unimplemented_tier_is_refused_not_silently_upgraded():
         "version: 1\ntier: sample\nsample:\n  tables: [t]\n").tier, "sample")
 
 
-def test_config_dsn_target_is_refused_until_its_interlocks_exist():
-    _rejects("dsn", "version: 1\ntarget:\n  type: dsn\n", "four interlocks")
+def test_config_dsn_target_is_refused():
+    _rejects("dsn", "version: 1\ntarget:\n  type: dsn\n", "did not create")
 
 
 def test_config_jobs_defaults_to_one_and_validates():
