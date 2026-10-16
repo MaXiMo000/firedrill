@@ -168,7 +168,8 @@ def tool_image(tool: str, base: str) -> str:
                       "RUN chmod 755 /usr/local/bin/wal-g\n")
     try:
         built = subprocess.run(["docker", "build", "-q", "-t", tag, "-"], input=dockerfile,
-                               capture_output=True, text=True, timeout=900, check=False)
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=900, check=False)
     except subprocess.TimeoutExpired:
         raise docker.TargetError(f"building {tag} timed out") from None
     if built.returncode != 0:

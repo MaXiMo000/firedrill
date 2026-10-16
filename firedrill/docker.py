@@ -56,10 +56,15 @@ def _run(args: list[str], env: dict | None = None, timeout: int = 300):
     non-zero exit as "this did not work"; an exception instead escaped the
     whole run as a traceback, with no report at all. Seen live: one
     `pg_isready` probe stalled for 30s on a loaded Docker Desktop host and
-    crashed a restore that had minutes of ready_timeout left."""
+    crashed a restore that had minutes of ready_timeout left.
+
+    Output is decoded as UTF-8, never the platform default: on Windows that is
+    cp1252, and one non-ASCII byte in a restore's output killed the reader and
+    returned no output at all."""
     try:
         return subprocess.run(
-            args, capture_output=True, text=True, timeout=timeout, env=env, check=False
+            args, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout, env=env, check=False
         )
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(

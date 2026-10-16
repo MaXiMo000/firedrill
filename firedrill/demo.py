@@ -45,7 +45,8 @@ def _psql_exit(container: docker.Container, sql: str) -> int:
     result = subprocess.run(
         ["docker", "exec", "-i", "-u", "postgres", container.name,
          "psql", "-q", "-U", "postgres", "-d", "psql_check"],
-        input=sql, capture_output=True, text=True, timeout=600, check=False)
+        input=sql, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=600, check=False)
     return result.returncode
 
 

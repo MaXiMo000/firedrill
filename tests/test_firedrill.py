@@ -833,6 +833,16 @@ def test_doctor_says_how_to_fix_each_failure():
     check("config", "--no-config" in fix("firedrill.yml", "bad key"), True)
 
 
+def test_command_output_is_decoded_as_utf8_on_every_platform():
+    """A restore's output can hold any byte the dump does. Decoded with the
+    platform default (cp1252 on Windows), one such byte returned no output."""
+    text = "café → Łódź 日本"
+    script = f"import sys; sys.stdout.buffer.write({text!r}.encode('utf-8') + b'\\x8d')"
+    result = docker._run([sys.executable, "-c", script])
+    check("utf-8 survives", result.stdout.startswith(text), True)
+    check("an undecodable byte is replaced, not fatal", result.stdout.endswith("�"), True)
+
+
 def test_cli_doctor_exit_code_matches_the_checks():
     from firedrill.cli import main
     ok = all(ok for _, ok, _ in drill.doctor_checks())

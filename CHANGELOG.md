@@ -4,6 +4,7 @@
 
 - `firedrill demo`: drills a sample backup and a cut-off copy of it, and shows that psql restores the cut copy with exit 0. Needs only Docker.
 - `firedrill doctor` prints how to fix each failed check: install or start Docker, switch to Linux containers, socket permissions, scratch space, config.
+- Fixed: on Windows (or any non-UTF-8 locale), a single non-ASCII byte in a restore's output made firedrill lose that output entirely. Command output is now always decoded as UTF-8.
 
 ## 0.5.1 - 2026-10-16
 
