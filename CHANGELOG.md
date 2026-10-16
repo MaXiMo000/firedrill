@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `firedrill demo`: drills a sample backup and a cut-off copy of it, and shows that psql restores the cut copy with exit 0. Needs only Docker.
+- `firedrill doctor` prints how to fix each failed check: install or start Docker, switch to Linux containers, socket permissions, scratch space, config.
+
 ## 0.5.1 - 2026-10-16
 
 - Documentation: a demo of real output at the top of the README, a security policy, a changelog, and issue templates.

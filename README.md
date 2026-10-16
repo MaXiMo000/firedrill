@@ -83,6 +83,7 @@ inside the target container, which is also what makes the version matching real.
 ## Use
 
 ```bash
+firedrill demo                             # a good backup and a cut-off copy, side by side (needs only Docker)
 firedrill run path/to/dump.dump            # restore and report
 firedrill run s3://backups/pg/daily/       # the newest object under a prefix
 firedrill run --live DATABASE_URL --keep backups/   # dump a running database now, prove it restores

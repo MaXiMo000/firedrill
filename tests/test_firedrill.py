@@ -820,6 +820,19 @@ def test_doctor_checks_the_things_run_assumes_and_never_reports():
           dict((n, ok) for n, ok, _ in checks)["scratch dir writable"], True)
 
 
+def test_doctor_says_how_to_fix_each_failure():
+    fix = drill.doctor_fix
+    check("docker missing", "get-docker" in fix("docker", "the `docker` command is not on PATH"), True)
+    check("daemon down on linux", "systemctl" in fix("docker", "cannot connect", "linux"), True)
+    check("daemon down on windows", "Docker Desktop" in fix("docker", "cannot connect", "win32"), True)
+    check("windows containers", "Linux containers" in fix(
+        "docker", "the docker daemon is in windows-container mode"), True)
+    check("socket permission", "usermod" in fix(
+        "docker", "permission denied while trying to connect"), True)
+    check("disk on windows names TEMP", "TEMP" in fix("scratch disk space", "0.1 GiB free", "win32"), True)
+    check("config", "--no-config" in fix("firedrill.yml", "bad key"), True)
+
+
 def test_cli_doctor_exit_code_matches_the_checks():
     from firedrill.cli import main
     ok = all(ok for _, ok, _ in drill.doctor_checks())
@@ -1499,6 +1512,19 @@ semantics:
 
 def _ladder_run(fixture: str):
     return drill.run(corpus(fixture), cfg=config.loads(LADDER_CONFIG))
+
+
+def test_integration_demo_passes_the_good_copy_and_fails_the_cut_one():
+    """`firedrill demo` is the first thing a new user runs; it has to show the
+    truncated copy failing, and say so, or it argues against the tool."""
+    needs_docker()
+    from firedrill import demo
+    lines = []
+    code = demo.run(out=lines.append)
+    text = "\n".join(lines)
+    check("demo exits 0 when the two copies are told apart", code, 0)
+    check("psql accepted the cut copy", "psql restores backup-cut.sql: exit 0" in text, True)
+    check("the cut copy is named as truncated", "ARCHIVE_TRUNCATED" in text, True)
 
 
 def test_integration_healthy_passes_every_rung():

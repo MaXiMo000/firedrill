@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import pathlib
 import shutil
+import sys
 import tempfile
 import time
 
@@ -1103,3 +1104,30 @@ def doctor_checks() -> list[tuple[str, bool, str]]:
             checks.append(("firedrill.yml", False, f"{found}: {exc}"))
 
     return checks
+
+
+def doctor_fix(name: str, detail: str, platform: str = sys.platform) -> str:
+    """What to do about a failed doctor check, in one line. A diagnosis a
+    first-time user cannot act on is where most of them give up."""
+    d = detail.lower()
+    temp_var = "TEMP" if platform.startswith("win") else "TMPDIR"
+    if name == "docker":
+        if "not on path" in d:
+            return "install Docker: https://docs.docker.com/get-docker/"
+        if "container mode" in d:
+            return ("switch Docker Desktop to Linux containers "
+                    "(tray icon -> Switch to Linux containers)")
+        if "permission denied" in d:
+            return ("add yourself to the docker group: sudo usermod -aG docker $USER, "
+                    "then log out and back in")
+        if platform.startswith("linux"):
+            return "start the daemon: sudo systemctl start docker"
+        return "start Docker Desktop and wait until the engine is running, then re-run"
+    if name == "scratch disk space":
+        return (f"free at least {_MIN_SCRATCH_BYTES // 1024**3} GiB, or point {temp_var} "
+                "at a disk with more room")
+    if name == "scratch dir writable":
+        return f"point {temp_var} at a directory you can write to"
+    if name == "firedrill.yml":
+        return "fix the setting named above, or run with --no-config"
+    return ""
