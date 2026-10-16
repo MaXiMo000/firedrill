@@ -7,12 +7,20 @@
 
 <p align="center"><img src="https://raw.githubusercontent.com/MaXiMo000/firedrill/main/docs/demo.svg" alt="firedrill restoring a dump that was cut off mid-write and reporting ARCHIVE_TRUNCATED, which psql alone restores with exit 0" width="100%"></p>
 
-firedrill takes a Postgres backup and *actually restores it* into a disposable,
-version-matched container, then reports whether it worked and how long each
+firedrill takes a PostgreSQL, MySQL or MariaDB backup and *actually restores it*
+into a disposable, version-matched container, then reports whether it worked and how long each
 stage took. It is built to fail your build the day a backup stops being
 restorable — not the day you need it.
 
 > A verification that could not run never reports as passing.
+
+**Try it in a minute** (needs only Docker): a sample backup, a copy cut off part-way
+through, and the proof that `psql` restores the broken one with exit 0.
+
+```bash
+pip install firedrill
+firedrill demo
+```
 
 **<https://maximo000.github.io/firedrill/>** — what it checks, and the measurements behind each check.
 
@@ -22,7 +30,7 @@ non-zero exit, never a green tick. A backup tool that says "OK" because it
 silently skipped the restore is worse than no tool, because it manufactures
 confidence.
 
-## Status
+## What it checks
 
 Fetch (local, presigned URL, or S3, checksum-verified when you
 supply a digest — and reported as unverified when you do not),
