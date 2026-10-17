@@ -244,6 +244,15 @@ each engine's own tool:
 | the MySQL dump gzipped, 36 MB | PASS |
 | the MySQL dump cut off at 80 MB | FAIL: `ARCHIVE_TRUNCATED`, the client's `ERROR 1064 at line 265`, 7 of 8 tables, both counts wrong |
 
+`python tests/field_test.py --mysql` repeats this on two more databases other
+people wrote, MySQL's [sakila](https://dev.mysql.com/doc/sakila/en/) (views,
+triggers, routines, spatial and full-text columns) and
+[chinook](https://github.com/lerocha/chinook-database), on MySQL 8.4 and
+MariaDB 11.4. Each is dumped by the engine's own tool and drilled whole, cut at
+a statement boundary, and cut mid-line: every whole dump restores with no
+findings, and every cut copy is `ARCHIVE_TRUNCATED`, including the ones the
+`mysql` client loads with exit 0.
+
 ## Which PostgreSQL versions
 
 Tested end to end against **13, 14, 15, 16, 17 and 18** — dump on any of them,
@@ -624,7 +633,8 @@ it (Windows, where Linux containers cannot run) those tests skip *by name* and
 the count is printed, so "it passed" and "it did not run" never look alike.
 
 `python tests/field_test.py` restores pagila, chinook and northwind — real
-databases this project did not write. Worth running after changing any check:
+databases this project did not write (`--mysql` does the same for sakila and
+chinook on MySQL and MariaDB, `--mutate` breaks pagila one way at a time). Worth running after changing any check:
 the corpus is synthetic, so it can only find the cases its author thought of.
 
 ### Cutting a release

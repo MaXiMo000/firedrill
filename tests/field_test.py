@@ -2,6 +2,7 @@
 
     python tests/field_test.py              # restore them, expect silence
     python tests/field_test.py --mutate     # break one thing at a time
+    python tests/field_test.py --mysql      # sakila and chinook on MySQL and MariaDB
 
 The corpus in `make_corpus.py` is synthetic by construction. That is what makes
 it precise -- each fixture is broken in exactly one way -- and it is also what
@@ -21,16 +22,19 @@ Needs Docker and network access. Reports what it finds, including nothing.
 
 from __future__ import annotations
 
+import io
 import pathlib
+import re
 import subprocess
 import sys
+import tarfile
 import tempfile
 import urllib.request
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from firedrill import drill, docker  # noqa: E402
+from firedrill import drill, docker, mysql  # noqa: E402
 import make_corpus  # noqa: E402
 
 # Widely used, publicly published, and not written by us. pagila is the
@@ -231,11 +235,104 @@ def mutate(workdir: pathlib.Path) -> int:
     return 0
 
 
+# MySQL's own sample (views, triggers, routines, spatial and full-text
+# columns) and chinook's MySQL edition. Each is loaded, dumped with the
+# engine's own dump tool, and drilled three ways: whole, cut at a statement
+# boundary (the mysql client restores that with exit 0), and cut mid-line.
+MYSQL_TARGETS = ("mysql:8.4", "mariadb:11.4")
+MYSQL_SOURCES = {
+    "sakila": {"schema": "sakila", "tar": "https://downloads.mysql.com/docs/sakila-db.tar.gz",
+               "members": ["sakila-db/sakila-schema.sql", "sakila-db/sakila-data.sql"]},
+    "chinook": {"schema": "Chinook",
+                "urls": ["https://raw.githubusercontent.com/lerocha/chinook-database/master/"
+                         "ChinookDatabase/DataSources/Chinook_MySql.sql"]},
+}
+
+
+def _mysql_files(name: str, workdir: pathlib.Path) -> list[pathlib.Path]:
+    spec = MYSQL_SOURCES[name]
+    if "urls" in spec:
+        return _download(spec["urls"], workdir)
+    print(f"    fetching {spec['tar'].rsplit('/', 1)[-1]} ...", flush=True)
+    with urllib.request.urlopen(spec["tar"], timeout=180) as response:
+        archive = tarfile.open(fileobj=io.BytesIO(response.read()))
+    paths = []
+    for member in spec["members"]:
+        dest = workdir / member.rsplit("/", 1)[-1]
+        dest.write_bytes(archive.extractfile(member).read())
+        paths.append(dest)
+    return paths
+
+
+def mysql_field(workdir: pathlib.Path) -> int:
+    """Each published database must restore silently whole, and both cut
+    copies must be named truncated. The dump is captured as bytes: decoding
+    it as text corrupts binary columns, and sakila has GEOMETRY."""
+    files = {name: _mysql_files(name, workdir) for name in MYSQL_SOURCES}
+    placeholder = workdir / "empty.sql"
+    placeholder.write_text("")
+    problems = []
+    for target in MYSQL_TARGETS:
+        engine, version = target.split(":")
+        dumper = "mariadb-dump" if engine == "mariadb" else "mysqldump"
+        with mysql.MySQLContainer(engine, version, placeholder) as src:
+            src.wait_ready()
+            for name, spec in MYSQL_SOURCES.items():
+                errors = 0
+                for path in files[name]:
+                    subprocess.run(["docker", "cp", str(path), f"{src.name}:/tmp/{path.name}"],
+                                   capture_output=True, check=True)
+                    loaded = src.shell(f"{src._cmd('mysql')} -h127.0.0.1 -uroot < /tmp/{path.name}")
+                    errors += sum(1 for line in loaded.stderr.splitlines() if line.startswith("ERROR"))
+                if errors:
+                    raise RuntimeError(f"{name} did not load into {target}: {errors} error(s)")
+                whole = workdir / f"{engine}-{name}.sql"
+                with open(whole, "wb") as handle:
+                    dumped = subprocess.run(
+                        ["docker", "exec", "-u", "root", src.name, "sh", "-c",
+                         'export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"; '
+                         f"{dumper} -h127.0.0.1 -uroot --routines --triggers --events "
+                         f"--databases {spec['schema']}"],
+                        stdout=handle, stderr=subprocess.PIPE)
+                if dumped.returncode:
+                    raise RuntimeError(f"{dumper} of {name} failed: {dumped.stderr[-300:]!r}")
+                data = whole.read_bytes()
+                inserts = [m.start() for m in re.finditer(rb"^INSERT INTO", data, re.M)]
+                at_statement = workdir / f"{engine}-{name}-cut-statement.sql"
+                at_statement.write_bytes(data[:inserts[len(inserts) // 2]])
+                mid_line = workdir / f"{engine}-{name}-cut-mid-line.sql"
+                mid_line.write_bytes(data[:int(len(data) * 0.6)])
+
+                print(f"  {name} on {target}:")
+                for label, path, expect_cut in (("whole", whole, False),
+                                                ("cut at a statement", at_statement, True),
+                                                ("cut mid-line", mid_line, True)):
+                    report = drill.run(path)
+                    rules = sorted({f.rule for f in report.findings})
+                    print(f"    {label:20} exit={report.exit_code}  "
+                          f"{report.stage('smoke').detail:24} {', '.join(rules) or '(silent)'}")
+                    if expect_cut and "ARCHIVE_TRUNCATED" not in rules:
+                        problems.append(f"{name} {target} {label}: truncation not caught")
+                    if not expect_cut and rules:
+                        problems.append(f"{name} {target} whole: findings on a healthy dump")
+    print()
+    if problems:
+        print("PROBLEMS:\n  " + "\n  ".join(problems))
+        return 1
+    print("Every whole dump restored silently, and every cut copy was named truncated.")
+    return 0
+
+
 def main() -> int:
     usable, why = docker.docker_available()
     if not usable:
         print(f"docker is not usable: {why}", file=sys.stderr)
         return 2
+
+    if "--mysql" in sys.argv:
+        with tempfile.TemporaryDirectory() as tmp:
+            print("published MySQL databases through mysqldump and mariadb-dump:")
+            return mysql_field(pathlib.Path(tmp))
 
     if "--mutate" in sys.argv:
         with tempfile.TemporaryDirectory() as tmp:
