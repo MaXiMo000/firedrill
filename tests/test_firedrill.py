@@ -30,7 +30,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from firedrill import archive, config, docker, drill, report as reporting, restore
 from firedrill.cli import _duration, build_parser
 from firedrill.finding import (
-    Finding, SEVERITIES, forget_secrets, redact, register_secret, should_fail, worst,
+    Finding, forget_secrets, redact, register_secret, should_fail, worst,
 )
 
 HERE = pathlib.Path(__file__).resolve().parent

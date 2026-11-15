@@ -256,7 +256,7 @@ _TRACE = re.compile(
 
 
 def _recovery_trace(logs: str, keep: int = 12) -> str:
-    lines = [l.strip() for l in logs.splitlines() if _TRACE.search(l)]
+    lines = [line.strip() for line in logs.splitlines() if _TRACE.search(line)]
     return "\n".join(lines[-keep:]) if lines else logs.strip()[-600:]
 
 

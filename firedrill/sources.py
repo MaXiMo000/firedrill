@@ -126,10 +126,10 @@ def _fetch_https(source, workdir: pathlib.Path) -> Artifact:
         )
 
     destination = workdir / "artefact.dump"
-    request = urllib.request.Request(url, method="GET")
+    request = urllib.request.Request(url, method="GET")  # noqa: S310 - scheme checked above
     try:
         with urllib.request.urlopen(request, timeout=300) as response, \
-                destination.open("wb") as handle:
+                destination.open("wb") as handle:  # noqa: S310 - scheme checked above
             shutil.copyfileobj(response, handle, CHUNK)
     except urllib.error.HTTPError as exc:
         raise SourceError(

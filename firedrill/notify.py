@@ -52,7 +52,7 @@ def send(report, env_var: str, when: str = "fail", opener=urllib.request.urlopen
         raise NotifyError(f"${env_var} is not set")
     if not url.startswith("https://") and not url.startswith(("http://localhost", "http://127.0.0.1")):
         raise NotifyError(f"${env_var} must be an https:// URL")
-    request = urllib.request.Request(url, data=json.dumps(payload(report)).encode(),
+    request = urllib.request.Request(url, data=json.dumps(payload(report)).encode(),  # noqa: S310 - scheme checked above
                                      headers={"Content-Type": "application/json"}, method="POST")
     try:
         with opener(request, timeout=30) as response:

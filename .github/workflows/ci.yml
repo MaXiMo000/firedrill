@@ -13,14 +13,24 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+      - run: pip install ruff==0.16.8
+      - run: ruff check .
+
   test:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         # 3.10 is the floor declared in pyproject. Test the floor, not just today.
-        python: ["3.10", "3.13"]
+        python: ["3.10", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -42,14 +52,14 @@ jobs:
         if: runner.os == 'Linux'
         run: python tests/test_firedrill.py --require-integration
 
-      # Windows runners cannot run Linux containers at all, so the container
+      # Windows and macOS runners cannot run Linux containers, so the container
       # tests genuinely cannot execute. They skip by name and are counted --
       # the run prints how many, so "it passed" and "it did not run" stay
       # distinguishable. Everything version-independent (the archive header
       # parser, the stderr classifier, the report logic) still runs here,
       # which is where path and subprocess handling actually breaks.
       - name: Pure suite, container tests skip and say so
-        if: runner.os == 'Windows'
+        if: runner.os != 'Linux'
         run: python tests/test_firedrill.py
 
   dogfood:

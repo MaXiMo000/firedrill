@@ -146,7 +146,7 @@ class Container:
 
     # -- lifecycle ---------------------------------------------------------
 
-    def __enter__(self) -> "Container":
+    def __enter__(self) -> Container:
         self.start()
         return self
 
@@ -261,7 +261,7 @@ def _path() -> str:
 
 def _home() -> str:
     import os
-    return os.environ.get("HOME", "/tmp")
+    return os.environ.get("HOME", "/tmp")  # noqa: S108 - HOME fallback for the docker CLI, nothing written
 
 
 def orphans() -> list[str]:

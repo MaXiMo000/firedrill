@@ -348,7 +348,6 @@ def main() -> int:
         surprises = 0
         for name, dump in sorted(dumps.items()):
             report = drill.run(dump)
-            rules = [f.rule for f in report.findings]
             print(f"  {name:10} exit={report.exit_code}  "
                   f"tables={report.stage('smoke').detail:<18} "
                   f"integrity={report.stage('integrity').detail}")

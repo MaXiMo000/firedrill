@@ -134,7 +134,7 @@ def build_noext_image(major: str) -> str:
     return tag
 
 
-def _variant(src: "Source", dest: pathlib.Path, dbname: str, mutation: str):
+def _variant(src: Source, dest: pathlib.Path, dbname: str, mutation: str):
     """The healthy schema in its own database, broken in exactly one way.
 
     Built from the same SCHEMA/SEED/INDEX as healthy rather than cloned with
