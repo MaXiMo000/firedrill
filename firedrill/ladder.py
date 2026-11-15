@@ -28,6 +28,12 @@ def _rows(result) -> list[list[str]]:
     return [line.split(SEP) for line in result.stdout.strip().splitlines() if line]
 
 
+def _ident(*parts: str) -> str:
+    """Quote catalog names read back from the restored database, which can
+    hold any character: `a"b` -> "a""b"; parts are joined with a dot."""
+    return ".".join('"' + p.replace('"', '""') + '"' for p in parts)
+
+
 def _quote(identifier: str) -> str:
     """`orders` -> "orders"; `public.orders` -> "public"."orders".
 
@@ -319,7 +325,7 @@ def volume(container, cfg, database: str,
             ))
             continue
 
-        counted = container.sql(f"select count(*) from {_quote(table)}",
+        counted = container.sql(f"select count(*) from {_quote(table)}",  # noqa: S608 - identifier validated in config.py
                                 database=database)
         if counted.returncode != 0:
             findings.append(Finding(
@@ -660,14 +666,14 @@ def integrity(container, cfg, database: str,
         fed.setdefault((seq_schema, seq_name), []).append((tbl_schema, tbl_name, column))
 
     for (seq_schema, seq_name), columns in sorted(fed.items()):
-        sequence = f'"{seq_schema}"."{seq_name}"'
+        sequence = _ident(seq_schema, seq_name)
         # The high-water mark across every column this sequence feeds. A
         # sequence is only behind if it is behind the largest of them.
         highest = " union all ".join(
-            f'select max("{col}") as v from "{sch}"."{tbl}"'
+            f'select max({_ident(col)}) as v from {_ident(sch, tbl)}'  # noqa: S608 - quoted by _ident
             for sch, tbl, col in columns)
         probe = container.sql(
-            f'select (select last_value from {sequence}), '
+            f'select (select last_value from {sequence}), '  # noqa: S608 - quoted by _ident
             f'coalesce((select max(v) from ({highest}) x), 0)',
             database=database,
         )

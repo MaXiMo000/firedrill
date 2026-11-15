@@ -360,7 +360,7 @@ def run_physical(tool: str, *, repo=None, stanza=None, backup=None, target=None,
         try:
             container.start()
             container.wait_ready()
-        except docker.TargetError as exc:
+        except docker.TargetError:
             logs = container.logs(tail=200)
             stage("recover").seconds = time.monotonic() - started
             if "[075]" in logs or "before consistent recovery point" in logs:

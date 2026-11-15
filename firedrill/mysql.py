@@ -156,8 +156,8 @@ def restore(container: MySQLContainer, gzipped: bool) -> tuple[int, list[Finding
     reader = "gunzip -c" if gzipped else "cat"
     result = container.shell(
         f"{reader} {docker.DUMP_PATH} | {container._cmd('mysql')} -h127.0.0.1 -uroot")
-    stderr = "\n".join(l for l in (result.stderr or "").splitlines()
-                       if "Using a password on the command line" not in l)
+    stderr = "\n".join(line for line in (result.stderr or "").splitlines()
+                       if "Using a password on the command line" not in line)
     findings = []
     for code, state, line, message in _CLIENT_ERROR.findall(stderr):
         findings.append(Finding(
