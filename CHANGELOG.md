@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The release workflow runs only for version tags, not the moving `v0` tag.
+
 ## 0.7.0 - 2026-11-18
 
 - SQLite: `firedrill run app.db` checks a SQLite database with no container: header-exact truncation, smoke, your `semantics:` checks, `integrity_check` and `foreign_key_check`. The backup is copied, never opened in place.
