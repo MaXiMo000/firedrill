@@ -47,6 +47,10 @@ def human(report: Report, colour: bool = False) -> str:
         lines.append(f"  archive   {name} dump{packed}")
         lines.append(f"  source    {name} {a.get('server_version')}  -> restored into "
                      f"{a['engine']}:{a.get('restored_into_major')}")
+    elif a.get("format") == "sqlite":
+        lines.append(f"  archive   SQLite database  {_size(a.get('size_bytes', 0))}")
+        lines.append(f"  source    SQLite {a.get('server_version') or '?'}  -> opened with "
+                     f"sqlite3 {a.get('restored_with')}, no container")
     elif a.get("recovery_target_time"):
         # A PITR run has no archive to describe. Printing the dump fields here
         # rendered "archive None vNone 0B from None", which is worse than

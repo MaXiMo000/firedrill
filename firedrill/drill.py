@@ -15,7 +15,7 @@ import sys
 import tempfile
 import time
 
-from . import archive, docker, history as history_module, ladder, mysql, physical, pitr, \
+from . import archive, docker, history as history_module, ladder, mysql, physical, pitr, sqlite, \
     restore as restore_stage, sources
 from . import config as _config_module
 from .config import DEFAULT as DEFAULT_CONFIG
@@ -594,6 +594,95 @@ def _run_mysql(report: Report, found: dict, dump_path, *, cfg, flavour: str,
     return report
 
 
+def _run_sqlite(report: Report, found: dict, dump_path, *, cfg, workdir, began: float) -> Report:
+    """A SQLite database file: header checked against the file's real size,
+    copied into the scratch directory and opened, then smoke, semantics and
+    SQLite's own integrity and foreign-key checks."""
+    def stage(name):
+        return next(s for s in report.stages if s.name == name)
+
+    report.archive.update({"format": "sqlite", "server_version": found["writer_version"],
+                           "size_bytes": found["actual_bytes"], "page_size": found["page_size"],
+                           "pages": found["pages"], "restored_with": sqlite.sqlite3.sqlite_version})
+    for name in ("structure", "volume"):
+        stage(name).status = NOT_CONFIGURED
+        stage(name).detail = "PostgreSQL only"
+
+    stage("inspect").status = OK
+    stage("inspect").detail = (f"SQLite, last written by {found['writer_version'] or 'an unknown version'}"
+                               f", {found['pages'] or '?'} page(s) of {found['page_size']} bytes")
+    expected, actual = found["expected_bytes"], found["actual_bytes"]
+    if expected is not None and actual < expected:
+        stage("inspect").status = FAILED
+        report.findings.append(Finding(
+            stage="inspect", rule="ARCHIVE_TRUNCATED", severity="critical",
+            message=f"the database header says {expected:,} bytes and the file has {actual:,}: "
+                    "the copy was cut off",
+            fix="The copy stopped part-way: a file copied while it was being written, "
+                "or an upload that did not finish. Take backups with `sqlite3 db "
+                "'.backup out.db'` or `VACUUM INTO`, not a plain file copy.",
+            evidence=""))
+
+    stage("target").status = OK
+    stage("target").detail = f"sqlite3 {sqlite.sqlite3.sqlite_version}, no container needed"
+
+    scratch = workdir or pathlib.Path(tempfile.mkdtemp(prefix="firedrill-"))
+    started = time.monotonic()
+    target, failed = sqlite.restore(dump_path, scratch)
+    try:
+        stage("restore").seconds = time.monotonic() - started
+        report.findings.extend(failed)
+        if failed:
+            # It was attempted and SQLite said no: a proved failure, not an
+            # unverified backup.
+            report.verified = True
+            stage("restore").status = FAILED
+            stage("restore").detail = "could not open"
+            report.total_seconds = time.monotonic() - began
+            return report
+        report.verified = True
+        stage("restore").status = OK
+        stage("restore").detail = "copied and opened"
+
+        started = time.monotonic()
+        tables = sqlite.user_tables(target)
+        stage("smoke").seconds = time.monotonic() - started
+        stage("smoke").detail = f"{len(tables)} user table(s)"
+        if tables:
+            stage("smoke").status = OK
+        else:
+            stage("smoke").status = FAILED
+            report.findings.append(Finding(
+                stage="smoke", rule="SMOKE_EMPTY", severity="high",
+                message="the database holds no user tables",
+                fix="It opened, and there is nothing in it you would miss.", evidence=""))
+
+        if cfg.semantics:
+            started = time.monotonic()
+            sem, _ = ladder.semantics(target, cfg, "main")
+            report.findings.extend(sem)
+            stage("semantics").seconds = time.monotonic() - started
+            stage("semantics").status = FAILED if sem else OK
+            stage("semantics").detail = f"{len(cfg.semantics)} check(s)"
+        else:
+            stage("semantics").status = NOT_CONFIGURED
+            stage("semantics").detail = "no semantics checks in the config"
+
+        started = time.monotonic()
+        checked = sqlite.integrity(target)
+        report.findings.extend(checked)
+        stage("integrity").seconds = time.monotonic() - started
+        stage("integrity").status = FAILED if checked else OK
+        stage("integrity").detail = "integrity_check, foreign_key_check"
+    finally:
+        target.close()
+        if workdir is None:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+    report.total_seconds = time.monotonic() - began
+    return report
+
+
 def _sequence_detail(info: dict) -> str:
     """`9 of 13 sequence(s)` when some could not be linked to a column.
 
@@ -740,6 +829,11 @@ def _run(dump_path: str | pathlib.Path | None = None, *, flavour: str = "",
                 "bytes you meant to restore.",
             evidence=f"{artifact.origin}",
         ))
+
+    # A SQLite database file needs no container at all.
+    found = sqlite.detect(dump_path)
+    if found is not None:
+        return _run_sqlite(report, found, dump_path, cfg=cfg, workdir=workdir, began=began)
 
     # A MySQL or MariaDB dump takes its own path from here.
     found = mysql.detect(dump_path)

@@ -8,7 +8,8 @@
 <p align="center"><img src="https://raw.githubusercontent.com/MaXiMo000/firedrill/main/docs/demo.svg" alt="firedrill restoring a dump that was cut off mid-write and reporting ARCHIVE_TRUNCATED, which psql alone restores with exit 0" width="100%"></p>
 
 firedrill takes a PostgreSQL, MySQL or MariaDB backup and *actually restores it*
-into a disposable, version-matched container, then reports whether it worked and how long each
+into a disposable, version-matched container (a SQLite database needs no
+container at all), then reports whether it worked and how long each
 stage took. It is built to fail your build the day a backup stops being
 restorable — not the day you need it.
 
@@ -253,6 +254,39 @@ a statement boundary, and cut mid-line: every whole dump restores with no
 findings, and every cut copy is `ARCHIVE_TRUNCATED`, including the ones the
 `mysql` client loads with exit 0.
 
+## SQLite
+
+`firedrill run app.db` recognises a SQLite database by its header. A SQLite
+file is its own backup, so there is no container and no Docker: the file is
+copied into a scratch directory and opened there, never in place, so nothing
+can write to your backup. Then:
+
+- **Truncation.** The header records how many pages the database holds, so a
+  copy cut off part-way (a live file copied with `cp`, an upload that stopped)
+  is `ARCHIVE_TRUNCATED` by exact arithmetic, not a guess.
+- **Smoke.** It opens, and holds at least one user table.
+- **Your `semantics:` checks**, exactly as for Postgres and MySQL.
+- **Integrity.** SQLite's own `PRAGMA integrity_check` (`INTEGRITY_FAILED`),
+  and `PRAGMA foreign_key_check` (`FOREIGN_KEY_VIOLATION`): SQLite only
+  enforces foreign keys when the application turns them on, so orphaned rows
+  are common and worth knowing about.
+
+Tested on [chinook](https://github.com/lerocha/chinook-database)'s SQLite
+database (11 tables, 1 MB), with two `semantics:` checks counting invoices
+and tracks:
+
+| copy | result |
+|---|---|
+| whole | PASS: 11 tables, both counts right, integrity clean |
+| cut off at 80% | FAIL: `ARCHIVE_TRUNCATED` (header says 1,007,616 bytes, file has 806,092), and SQLite cannot open it |
+| one page in the middle zeroed | FAIL: `INTEGRITY_FAILED`, although both count checks still passed |
+
+The last row is why the integrity rung exists: a damaged database can still
+answer the questions you thought to ask.
+
+Back up a live SQLite database with `sqlite3 app.db ".backup out.db"` or
+`VACUUM INTO 'out.db'`, not a file copy, and drill the result.
+
 ## Which PostgreSQL versions
 
 Tested end to end against **13, 14, 15, 16, 17 and 18** — dump on any of them,
@@ -381,6 +415,8 @@ tick. "Nothing asked for this" and "this passed" are different facts.
 | `MATVIEW_UNPOPULATED` | a materialized view came back holding nothing; every query against it raises |
 | `COLLATION_MISMATCH` | the target's libc differs from the reference's — text indexes sort differently |
 | `COLLATION_UNVERIFIABLE` | the target reports no collation version, so sort order cannot be checked at all |
+| `INTEGRITY_FAILED` | SQLite: `PRAGMA integrity_check` found damage |
+| `FOREIGN_KEY_VIOLATION` | SQLite: rows point at parent rows that do not exist |
 
 Each of these is proved against a deliberately broken backup that `pg_restore`
 itself is perfectly happy with — that is the point of the whole ladder — and

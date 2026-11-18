@@ -24,6 +24,8 @@ import pathlib
 import re
 import subprocess
 import sys
+import tempfile
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -2873,6 +2875,105 @@ def test_integration_docker_unavailable_reports_rather_than_passes():
 
 # -------------------------------------------------------------------- run --
 
+# ------------------------------------------------------------------ sqlite --
+# No container: these run everywhere, Docker or not.
+
+def _sqlite_db(path, orphan: bool = False):
+    import sqlite3
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        "create table customer(id integer primary key, email text);"
+        "create table orders(id integer primary key,"
+        " customer_id integer references customer(id), total int);"
+        "create index orders_customer on orders(customer_id);")
+    conn.executemany("insert into customer(email) values (?)", [(f"c{i}@example.com",) for i in range(2000)])
+    conn.executemany("insert into orders(customer_id, total) values (?, ?)",
+                     [(i % 2000 + 1, i) for i in range(4000)])
+    if orphan:
+        conn.execute("insert into orders(customer_id, total) values (99999, 1)")
+    conn.commit()
+    conn.close()
+    return path
+
+
+def _rules(report):
+    return sorted(f.rule for f in report.findings)
+
+
+def test_sqlite_healthy_database_passes_without_docker():
+    from firedrill import sqlite
+    with tempfile.TemporaryDirectory() as tmp:
+        db = _sqlite_db(pathlib.Path(tmp) / "app.db")
+        with mock.patch.object(docker, "docker_available", return_value=(False, "no docker here")):
+            report = drill.run(db)
+        check("sqlite: healthy passes", (report.ok, _rules(report)), (True, []))
+        check("sqlite: detected", report.archive["format"], "sqlite")
+        check("sqlite: smoke counts tables", report.stage("smoke").detail, "2 user table(s)")
+        check("sqlite: not sqlite is not detected", sqlite.detect(pathlib.Path(__file__)), None)
+
+
+def test_sqlite_truncated_copy_is_caught():
+    with tempfile.TemporaryDirectory() as tmp:
+        db = _sqlite_db(pathlib.Path(tmp) / "app.db")
+        cut = pathlib.Path(tmp) / "cut.db"
+        data = db.read_bytes()
+        cut.write_bytes(data[: len(data) * 6 // 10])
+        report = drill.run(cut)
+        check_true("sqlite: truncated copy flagged", "ARCHIVE_TRUNCATED" in _rules(report))
+        check("sqlite: truncated copy fails, not unverified", (report.ok, report.verified), (False, True))
+
+
+def test_sqlite_damage_inside_is_caught_by_integrity_check():
+    with tempfile.TemporaryDirectory() as tmp:
+        db = _sqlite_db(pathlib.Path(tmp) / "app.db")
+        data = bytearray(db.read_bytes())
+        data[4096 * 4:4096 * 5] = bytes(4096)  # one page in the middle, zeroed
+        rot = pathlib.Path(tmp) / "rot.db"
+        rot.write_bytes(bytes(data))
+        report = drill.run(rot)
+        check("sqlite: same size, so not truncated", "ARCHIVE_TRUNCATED" in _rules(report), False)
+        check_true("sqlite: damage found", "INTEGRITY_FAILED" in _rules(report))
+        check("sqlite: damaged fails", report.ok, False)
+
+
+def test_sqlite_orphaned_rows_are_reported():
+    with tempfile.TemporaryDirectory() as tmp:
+        report = drill.run(_sqlite_db(pathlib.Path(tmp) / "app.db", orphan=True))
+        check("sqlite: orphan reported", _rules(report), ["FOREIGN_KEY_VIOLATION"])
+        check_true("sqlite: names the table", "orders" in report.findings[0].message)
+
+
+def test_sqlite_semantics_checks_run_against_the_copy():
+    with tempfile.TemporaryDirectory() as tmp:
+        db = _sqlite_db(pathlib.Path(tmp) / "app.db")
+        good = config.loads("version: 1\nsemantics:\n  - name: orders\n"
+                            "    sql: select count(*) from orders\n    expect: \"== 4000\"\n")
+        check("sqlite: semantics pass", _rules(drill.run(db, cfg=good)), [])
+        wrong = config.loads("version: 1\nsemantics:\n  - name: orders\n"
+                             "    sql: select count(*) from orders\n    expect: \">= 5000\"\n")
+        check("sqlite: semantics fail", _rules(drill.run(db, cfg=wrong)), ["SEMANTICS_FAILED"])
+
+
+def test_sqlite_backup_file_is_never_written_to():
+    import hashlib
+    with tempfile.TemporaryDirectory() as tmp:
+        db = _sqlite_db(pathlib.Path(tmp) / "app.db")
+        before = hashlib.sha256(db.read_bytes()).hexdigest()
+        drill.run(db)
+        check("sqlite: backup bytes unchanged", hashlib.sha256(db.read_bytes()).hexdigest(), before)
+        check("sqlite: nothing created beside it", sorted(p.name for p in pathlib.Path(tmp).iterdir()), ["app.db"])
+
+
+def test_sqlite_empty_database_is_smoke_empty():
+    import sqlite3
+    with tempfile.TemporaryDirectory() as tmp:
+        db = pathlib.Path(tmp) / "empty.db"
+        conn = sqlite3.connect(db)
+        conn.execute("pragma user_version = 1")  # writes a header, no tables
+        conn.close()
+        check("sqlite: empty database", _rules(drill.run(db)), ["SMOKE_EMPTY"])
+
+
 def main() -> int:
     require_integration = "--require-integration" in sys.argv
 
@@ -2884,7 +2985,7 @@ def main() -> int:
     # A floor, not a target. Edits that replace a range of lines have silently
     # swallowed whole blocks of tests before; the suite then goes green with
     # fewer tests and says nothing.
-    FLOOR = 157
+    FLOOR = 164
     if len(tests) < FLOOR:
         raise SystemExit(
             f"test suite shrank: {len(tests)} < {FLOOR}. An edit probably deleted "
