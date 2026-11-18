@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- SQLite: `firedrill run app.db` checks a SQLite database with no container: header-exact truncation, smoke, your `semantics:` checks, `integrity_check` and `foreign_key_check`. The backup is copied, never opened in place.
+
 ## 0.6.0 - 2026-10-18
 
 - `firedrill demo`: drills a sample backup and a cut-off copy of it, and shows that psql restores the cut copy with exit 0. Needs only Docker.
